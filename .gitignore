@@ -1,0 +1,13 @@
+/target
+/frontend/node_modules
+/frontend/dist
+/apps/desktop/gen
+/apps/desktop/target
+/apps/web-launcher/target
+/.postpub
+/.tmp
+*.log
+AIWriteX/logs
+AIWriteX/output
+AIWriteX/tests
+.agent-browser-shots

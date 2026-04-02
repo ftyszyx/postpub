@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>统一前后端工作流参考</title>
+    <meta property="article:published_time" content="2026-03-28T12:00:00Z" />
+  </head>
+  <body>
+    <article>
+      <h1>统一前后端工作流参考</h1>
+      <p>postpub 的目标是让桌面端和浏览器端复用同一套 Vue 前端和同一套 Axum API。</p>
+      <p>桌面壳只负责宿主能力，比如窗口管理、文件对话框和未来的本地系统集成，业务状态仍然放在 Rust 服务和共享前端中。</p>
+      <p>这种结构让测试也更直接，因为前端测试和后端测试都围绕统一接口展开，不需要为不同端维护两套行为。</p>
+    </article>
+  </body>
+</html>
