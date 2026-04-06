@@ -375,7 +375,13 @@ impl TemplateStore {
 
         let categories = fs::read_dir(&templates_root)?
             .filter_map(|entry| entry.ok())
-            .filter_map(|entry| entry.file_type().ok().filter(|kind| kind.is_dir()).map(|_| entry))
+            .filter_map(|entry| {
+                entry
+                    .file_type()
+                    .ok()
+                    .filter(|kind| kind.is_dir())
+                    .map(|_| entry)
+            })
             .map(|entry| entry.file_name().to_string_lossy().to_string())
             .collect::<Vec<_>>();
 
@@ -390,7 +396,12 @@ impl TemplateStore {
                     .file_type()
                     .ok()
                     .filter(|kind| kind.is_file())
-                    .and_then(|_| entry.path().file_name().map(|name| name.to_string_lossy().to_string()))
+                    .and_then(|_| {
+                        entry
+                            .path()
+                            .file_name()
+                            .map(|name| name.to_string_lossy().to_string())
+                    })
             })
             .collect::<Vec<_>>();
         html_files.sort();
@@ -563,7 +574,11 @@ mod tests {
 
         let templates = store.list_templates(None).expect("list defaults");
         assert_eq!(templates.len(), 35);
-        assert!(templates.iter().any(|item| item.relative_path == "其他/template1.html"));
-        assert!(templates.iter().any(|item| item.relative_path == "健康养生/t1.html"));
+        assert!(templates
+            .iter()
+            .any(|item| item.relative_path == "其他/template1.html"));
+        assert!(templates
+            .iter()
+            .any(|item| item.relative_path == "健康养生/t1.html"));
     }
 }

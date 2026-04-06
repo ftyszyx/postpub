@@ -73,7 +73,6 @@ describe("config store", () => {
                 {
                   id: "custom-1",
                   name: "Custom",
-                  key_name: "CUSTOM_API_KEY",
                   api_key: "",
                   api_base: "https://api.openai.com/v1",
                   model: "gpt-4o-mini",
@@ -139,7 +138,6 @@ describe("config store", () => {
                 {
                   id: "custom-1",
                   name: "Custom",
-                  key_name: "CUSTOM_API_KEY",
                   api_key: "",
                   api_base: "https://api.openai.com/v1",
                   model: "gpt-4o-mini",

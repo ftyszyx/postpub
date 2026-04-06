@@ -14,7 +14,7 @@ pub use aiforge::AiforgeEngine;
 pub use articles::{markdown_to_html, preview_html, ArticleStore};
 pub use config::ConfigStore;
 pub use error::{PostpubError, Result};
-pub use generation::GenerationService;
+pub use generation::{GenerationProgressReporter, GenerationService};
 pub use paths::AppPaths;
 pub use templates::TemplateStore;
 

@@ -41,6 +41,7 @@ const configSubnavItems = computed<ConfigSubnavItem[]>(() => [
 const navItems = computed<NavItem[]>(() => [
   { to: "/", label: t("nav.overview") },
   { to: "/generation", label: t("nav.generation") },
+  { to: "/tasks", label: t("nav.taskStatus") },
   { to: "/templates", label: t("nav.templates") },
   { to: "/articles", label: t("nav.articles") },
   {

@@ -43,9 +43,7 @@ describe("generation store", () => {
             id: "task-1",
             request: {
               topic: "Rust workflow",
-              platform: "web",
               reference_urls: [],
-              reference_ratio: 0.3,
               template_category: "general",
               template_name: "magazine",
               save_output: true
@@ -65,9 +63,7 @@ describe("generation store", () => {
               id: "task-1",
               request: {
                 topic: "Rust workflow",
-                platform: "web",
                 reference_urls: [],
-                reference_ratio: 0.3,
                 template_category: "general",
                 template_name: "magazine",
                 save_output: true
@@ -87,6 +83,82 @@ describe("generation store", () => {
     await store.createTask();
 
     expect(store.current?.id).toBe("task-1");
+    expect(FakeEventSource.instances[0]?.url).toContain("/api/generation/tasks/task-1/events");
+  });
+
+  it("retries the current task without creating a new task id", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse({
+          success: true,
+          data: {
+            id: "task-1",
+            request: {
+              topic: "Rust workflow",
+              reference_urls: [],
+              template_category: "general",
+              template_name: "magazine",
+              save_output: true
+            },
+            status: "Pending",
+            created_at: "2026-03-28T00:00:00Z",
+            updated_at: "2026-03-28T00:01:00Z",
+            events: []
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          success: true,
+          data: [
+            {
+              id: "task-1",
+              request: {
+                topic: "Rust workflow",
+                reference_urls: [],
+                template_category: "general",
+                template_name: "magazine",
+                save_output: true
+              },
+              status: "Running",
+              created_at: "2026-03-28T00:00:00Z",
+              updated_at: "2026-03-28T00:01:00Z",
+              events: []
+            }
+          ]
+        })
+      );
+
+    const store = useGenerationStore();
+    store.tasks = [
+      {
+        id: "task-1",
+        request: {
+          topic: "Rust workflow",
+          reference_urls: [],
+          template_category: "general",
+          template_name: "magazine",
+          save_output: true
+        },
+        status: "Failed",
+        created_at: "2026-03-28T00:00:00Z",
+        updated_at: "2026-03-28T00:00:30Z",
+        events: [],
+        output: undefined,
+        error: "boom"
+      }
+    ];
+
+    const retried = await store.retryTask(store.tasks[0]);
+
+    expect(retried?.id).toBe("task-1");
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/generation/tasks/task-1/retry",
+      expect.objectContaining({
+        method: "POST"
+      })
+    );
     expect(FakeEventSource.instances[0]?.url).toContain("/api/generation/tasks/task-1/events");
   });
 });

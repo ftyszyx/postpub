@@ -106,7 +106,6 @@ export interface AiforgeConfig {
 export interface CustomLlmProvider {
   id: string;
   name: string;
-  key_name: string;
   api_key: string;
   api_base: string;
   model: string;
@@ -178,12 +177,29 @@ export interface ArticleSummary {
   size_bytes: number;
   updated_at: string;
   status: string;
+  variant_count: number;
+}
+
+export interface ArticleVariantSummary {
+  target_id: string;
+  target_name: string;
+  platform_type: string;
+  format: string;
+  size_bytes: number;
+  updated_at: string;
+}
+
+export interface ArticleVariantDocument {
+  summary: ArticleVariantSummary;
+  content: string;
+  preview_html: string;
 }
 
 export interface ArticleDocument {
   summary: ArticleSummary;
   content: string;
   preview_html: string;
+  variants: ArticleVariantDocument[];
 }
 
 export interface ArticleDesign {
@@ -202,9 +218,7 @@ export interface SearchResult {
 
 export interface GenerateArticleRequest {
   topic: string;
-  platform: string;
   reference_urls: string[];
-  reference_ratio: number;
   template_category?: string;
   template_name?: string;
   save_output: boolean;
@@ -215,6 +229,7 @@ export interface GenerationOutput {
   format: string;
   content: string;
   preview_html: string;
+  variants: ArticleVariantDocument[];
   mode: string;
   sources: SearchResult[];
   article?: ArticleSummary;

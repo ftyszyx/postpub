@@ -1420,15 +1420,18 @@ code {
   z-index: 120;
   display: grid;
   place-items: center;
+  overflow: auto;
   padding: 24px;
   background: rgba(15, 23, 42, 0.48);
   backdrop-filter: blur(8px);
+  overscroll-behavior: contain;
 }
 
 .config-modal {
   width: min(760px, 100%);
   max-height: min(88vh, 920px);
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 22px;
   border: 1px solid var(--border);
   border-radius: 18px;

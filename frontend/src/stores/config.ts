@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { apiGet, apiPut, type ApiResponse } from "../api/client";
 import type {
   ConfigBundle,
+  CustomLlmProvider,
   ImageApiConfig,
   ImageModelProvider,
   ImageApiProviderConfig,
@@ -142,7 +143,6 @@ const emptyBundle = (): ConfigBundle => ({
       {
         id: "custom-1",
         name: "Custom",
-        key_name: "CUSTOM_API_KEY",
         api_key: "",
         api_base: "https://api.openai.com/v1",
         model: "gpt-4o-mini",
@@ -222,29 +222,31 @@ function normalizePublishTarget(target?: Partial<PublishTargetConfig> | null, in
   });
 }
 
+function normalizeCustomLlmProviders(providers?: CustomLlmProvider[] | null): CustomLlmProvider[] {
+  const nextProviders = providers?.length
+    ? providers
+    : emptyBundle().ui_config.custom_llm_providers;
+  const activeProvider = nextProviders.find((provider) => provider.enabled) || nextProviders[0];
+
+  return nextProviders.map((provider) => ({
+    ...provider,
+    protocol_type:
+      provider.protocol_type?.trim() === "custom"
+        ? "openai_compatible"
+        : provider.protocol_type?.trim() || "openai",
+    enabled: provider.id === activeProvider.id
+  }));
+}
+
 function normalizePostpubConfig(config: PostpubConfig): PostpubConfig {
   const publishTargets = config.publish_targets?.length
     ? config.publish_targets.map((target, index) => normalizePublishTarget(target, index + 1))
     : [];
-  const primaryPublishTarget =
-    publishTargets.find((target) => target.enabled) ||
-    publishTargets[0] ||
-    null;
 
   return {
     ...config,
-    publish_platform: primaryPublishTarget?.platform_type ?? config.publish_platform,
     img_api: normalizeImageApiConfig(config.img_api),
-    publish_targets: publishTargets,
-    use_template: primaryPublishTarget?.use_template ?? config.use_template,
-    template_category: primaryPublishTarget?.template_category ?? config.template_category,
-    template_name: primaryPublishTarget?.template_name ?? config.template_name,
-    use_compress: primaryPublishTarget?.use_compress ?? config.use_compress,
-    min_article_len: primaryPublishTarget?.min_article_len ?? config.min_article_len,
-    max_article_len: primaryPublishTarget?.max_article_len ?? config.max_article_len,
-    auto_publish: primaryPublishTarget?.auto_publish ?? config.auto_publish,
-    article_format: primaryPublishTarget?.article_format ?? config.article_format,
-    format_publish: primaryPublishTarget?.format_publish ?? config.format_publish
+    publish_targets: publishTargets
   };
 }
 
@@ -256,17 +258,13 @@ function normalizePageDesign(pageDesign?: Partial<PageDesignConfig> | null): Pag
 }
 
 function normalizeUiConfig(uiConfig: UiConfig): UiConfig {
-  const normalizedProviders = uiConfig.custom_llm_providers?.length
-    ? uiConfig.custom_llm_providers
-    : emptyBundle().ui_config.custom_llm_providers;
-
   return {
     ...uiConfig,
     theme: uiConfig.theme === "dark" ? "dark" : DEFAULT_THEME,
     window_mode: uiConfig.window_mode?.toUpperCase() === "MAXIMIZED" ? "MAXIMIZED" : DEFAULT_WINDOW_MODE,
     design_theme: uiConfig.design_theme === "default" ? "default" : DEFAULT_DESIGN_THEME,
     page_design: normalizePageDesign(uiConfig.page_design),
-    custom_llm_providers: normalizedProviders
+    custom_llm_providers: normalizeCustomLlmProviders(uiConfig.custom_llm_providers)
   };
 }
 

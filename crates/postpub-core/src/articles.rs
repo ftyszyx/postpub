@@ -5,8 +5,12 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use postpub_types::{ArticleDesign, ArticleDocument, ArticleSummary, UpdateArticleContentRequest};
+use postpub_types::{
+    ArticleDesign, ArticleDocument, ArticleSummary, ArticleVariantDocument, ArticleVariantSummary,
+    UpdateArticleContentRequest,
+};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{PostpubError, Result},
@@ -52,7 +56,8 @@ impl ArticleStore {
                 continue;
             }
 
-            articles.push(self.summary_from_path(&path)?);
+            let variant_count = self.load_variants_for_article_path(&path)?.len();
+            articles.push(self.summary_from_path(&path, variant_count)?);
         }
 
         articles.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -67,15 +72,7 @@ impl ArticleStore {
             )));
         }
 
-        let summary = self.summary_from_path(&path)?;
-        let content = fs::read_to_string(&path)?;
-        let preview_html = preview_html(summary.format.as_str(), &content);
-
-        Ok(ArticleDocument {
-            summary,
-            content,
-            preview_html,
-        })
+        self.document_from_path(&path)
     }
 
     pub fn update_article(
@@ -91,6 +88,7 @@ impl ArticleStore {
         }
 
         fs::write(&path, &request.content)?;
+        self.clear_variants_for_article_path(&path)?;
         self.get_article(relative_path)
     }
 
@@ -106,6 +104,10 @@ impl ArticleStore {
         let design_path = article_design_path(&path)?;
         if design_path.exists() {
             fs::remove_file(design_path)?;
+        }
+        let variants_path = article_variants_path(&path)?;
+        if variants_path.exists() {
+            fs::remove_file(variants_path)?;
         }
         Ok(())
     }
@@ -126,6 +128,23 @@ impl ArticleStore {
         );
         let path = self.paths.articles_dir().join(&file_name);
         fs::write(&path, content)?;
+        self.clear_variants_for_article_path(&path)?;
+
+        self.get_article(&file_name.replace('\\', "/"))
+    }
+
+    pub fn save_generated_source_article(
+        &self,
+        title: &str,
+        markdown: &str,
+        variants: &[ArticleVariantDocument],
+    ) -> Result<ArticleDocument> {
+        self.ensure_defaults()?;
+
+        let file_name = format!("{}.md", sanitize_filename(title));
+        let path = self.paths.articles_dir().join(&file_name);
+        fs::write(&path, markdown)?;
+        self.save_variants_for_article_path(&path, variants)?;
 
         self.get_article(&file_name.replace('\\', "/"))
     }
@@ -163,7 +182,21 @@ impl ArticleStore {
         Ok(design.clone())
     }
 
-    fn summary_from_path(&self, path: &Path) -> Result<ArticleSummary> {
+    fn document_from_path(&self, path: &Path) -> Result<ArticleDocument> {
+        let content = fs::read_to_string(path)?;
+        let variants = self.load_variants_for_article_path(path)?;
+        let summary = self.summary_from_path(path, variants.len())?;
+        let preview_html = preview_html(summary.format.as_str(), &content);
+
+        Ok(ArticleDocument {
+            summary,
+            content,
+            preview_html,
+            variants,
+        })
+    }
+
+    fn summary_from_path(&self, path: &Path, variant_count: usize) -> Result<ArticleSummary> {
         let metadata = fs::metadata(path)?;
         let updated_at: DateTime<Utc> =
             DateTime::<Utc>::from(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH));
@@ -190,7 +223,79 @@ impl ArticleStore {
             size_bytes: metadata.len(),
             updated_at,
             status: "draft".to_string(),
+            variant_count,
         })
+    }
+
+    fn load_variants_for_article_path(
+        &self,
+        article_path: &Path,
+    ) -> Result<Vec<ArticleVariantDocument>> {
+        let variants_path = article_variants_path(article_path)?;
+        if !variants_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let stored: ArticleVariantsFile =
+            serde_json::from_str(&fs::read_to_string(variants_path)?)?;
+        Ok(stored
+            .variants
+            .into_iter()
+            .map(|variant| {
+                let format = normalize_format(&variant.format).to_uppercase();
+                let preview_html = preview_html(&format, &variant.content);
+                ArticleVariantDocument {
+                    summary: ArticleVariantSummary {
+                        target_id: variant.target_id,
+                        target_name: variant.target_name,
+                        platform_type: variant.platform_type,
+                        format,
+                        size_bytes: variant.content.len() as u64,
+                        updated_at: variant.updated_at,
+                    },
+                    content: variant.content,
+                    preview_html,
+                }
+            })
+            .collect())
+    }
+
+    fn save_variants_for_article_path(
+        &self,
+        article_path: &Path,
+        variants: &[ArticleVariantDocument],
+    ) -> Result<()> {
+        let variants_path = article_variants_path(article_path)?;
+        if variants.is_empty() {
+            if variants_path.exists() {
+                fs::remove_file(variants_path)?;
+            }
+            return Ok(());
+        }
+
+        let stored = ArticleVariantsFile {
+            variants: variants
+                .iter()
+                .map(|variant| StoredArticleVariant {
+                    target_id: variant.summary.target_id.clone(),
+                    target_name: variant.summary.target_name.clone(),
+                    platform_type: variant.summary.platform_type.clone(),
+                    format: normalize_format(&variant.summary.format),
+                    updated_at: variant.summary.updated_at,
+                    content: variant.content.clone(),
+                })
+                .collect(),
+        };
+        fs::write(variants_path, serde_json::to_string_pretty(&stored)?)?;
+        Ok(())
+    }
+
+    fn clear_variants_for_article_path(&self, article_path: &Path) -> Result<()> {
+        let variants_path = article_variants_path(article_path)?;
+        if variants_path.exists() {
+            fs::remove_file(variants_path)?;
+        }
+        Ok(())
     }
 
     fn resolve_article_path(&self, relative_path: &str) -> Result<PathBuf> {
@@ -268,17 +373,54 @@ fn normalize_format(format: &str) -> String {
 
 fn article_design_path(article_path: &Path) -> Result<PathBuf> {
     let Some(parent) = article_path.parent() else {
-        return Err(PostpubError::InvalidPath(article_path.display().to_string()));
+        return Err(PostpubError::InvalidPath(
+            article_path.display().to_string(),
+        ));
     };
     let Some(stem) = article_path.file_stem() else {
-        return Err(PostpubError::InvalidPath(article_path.display().to_string()));
+        return Err(PostpubError::InvalidPath(
+            article_path.display().to_string(),
+        ));
     };
 
     Ok(parent.join(format!("{}.design.json", stem.to_string_lossy())))
 }
 
+fn article_variants_path(article_path: &Path) -> Result<PathBuf> {
+    let Some(parent) = article_path.parent() else {
+        return Err(PostpubError::InvalidPath(
+            article_path.display().to_string(),
+        ));
+    };
+    let Some(stem) = article_path.file_stem() else {
+        return Err(PostpubError::InvalidPath(
+            article_path.display().to_string(),
+        ));
+    };
+
+    Ok(parent.join(format!("{}.variants.json", stem.to_string_lossy())))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct ArticleVariantsFile {
+    #[serde(default)]
+    variants: Vec<StoredArticleVariant>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredArticleVariant {
+    target_id: String,
+    target_name: String,
+    platform_type: String,
+    format: String,
+    updated_at: DateTime<Utc>,
+    content: String,
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+    use postpub_types::{ArticleVariantDocument, ArticleVariantSummary};
     use tempfile::tempdir;
 
     use super::{markdown_to_html, ArticleStore};
@@ -293,6 +435,7 @@ mod tests {
             .save_generated_article("Platform|Topic", "md", "# Title\n\nContent")
             .expect("save article");
         assert_eq!(article.summary.relative_path, "Platform_Topic.md");
+        assert_eq!(article.summary.variant_count, 0);
 
         let list = store.list_articles().expect("list");
         assert_eq!(list.len(), 1);
@@ -332,5 +475,50 @@ mod tests {
         assert!(store
             .load_article_design(&article.summary.relative_path)
             .is_err());
+    }
+
+    #[test]
+    fn persists_generated_variants_next_to_markdown_source() {
+        let temp = tempdir().expect("temp dir");
+        let store = ArticleStore::new(AppPaths::from_root(temp.path().to_path_buf()));
+        let now = Utc::now();
+
+        let article = store
+            .save_generated_source_article(
+                "Variant|Demo",
+                "# Title\n\nBody",
+                &[ArticleVariantDocument {
+                    summary: ArticleVariantSummary {
+                        target_id: "publish-wechat-1".to_string(),
+                        target_name: "WeChat".to_string(),
+                        platform_type: "wechat".to_string(),
+                        format: "HTML".to_string(),
+                        size_bytes: 0,
+                        updated_at: now,
+                    },
+                    content: "<section><h1>Title</h1><p>Body</p></section>".to_string(),
+                    preview_html: "<section><h1>Title</h1><p>Body</p></section>".to_string(),
+                }],
+            )
+            .expect("save article with variants");
+
+        assert_eq!(article.summary.relative_path, "Variant_Demo.md");
+        assert_eq!(article.summary.variant_count, 1);
+        assert_eq!(article.variants.len(), 1);
+        assert_eq!(article.variants[0].summary.target_name, "WeChat");
+
+        let list = store.list_articles().expect("list");
+        assert_eq!(list[0].variant_count, 1);
+
+        let updated = store
+            .update_article(
+                &article.summary.relative_path,
+                &postpub_types::UpdateArticleContentRequest {
+                    content: "# Updated".to_string(),
+                },
+            )
+            .expect("update article");
+        assert!(updated.variants.is_empty());
+        assert_eq!(updated.summary.variant_count, 0);
     }
 }

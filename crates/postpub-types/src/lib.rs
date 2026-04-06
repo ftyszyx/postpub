@@ -326,7 +326,6 @@ impl Default for AiforgeConfig {
 pub struct CustomLlmProvider {
     pub id: String,
     pub name: String,
-    pub key_name: String,
     pub api_key: String,
     pub api_base: String,
     pub model: String,
@@ -340,7 +339,6 @@ impl Default for CustomLlmProvider {
         Self {
             id: "custom-1".to_string(),
             name: "Custom".to_string(),
-            key_name: "CUSTOM_API_KEY".to_string(),
             api_key: String::new(),
             api_base: "https://api.openai.com/v1".to_string(),
             model: "gpt-4o-mini".to_string(),
@@ -507,6 +505,25 @@ pub struct ArticleSummary {
     pub size_bytes: u64,
     pub updated_at: DateTime<Utc>,
     pub status: String,
+    #[serde(default)]
+    pub variant_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArticleVariantSummary {
+    pub target_id: String,
+    pub target_name: String,
+    pub platform_type: String,
+    pub format: String,
+    pub size_bytes: u64,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArticleVariantDocument {
+    pub summary: ArticleVariantSummary,
+    pub content: String,
+    pub preview_html: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -514,6 +531,8 @@ pub struct ArticleDocument {
     pub summary: ArticleSummary,
     pub content: String,
     pub preview_html: String,
+    #[serde(default)]
+    pub variants: Vec<ArticleVariantDocument>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -546,11 +565,7 @@ pub struct SearchResult {
 pub struct GenerateArticleRequest {
     pub topic: String,
     #[serde(default)]
-    pub platform: String,
-    #[serde(default)]
     pub reference_urls: Vec<String>,
-    #[serde(default)]
-    pub reference_ratio: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -569,6 +584,8 @@ pub struct GenerationOutput {
     pub format: String,
     pub content: String,
     pub preview_html: String,
+    #[serde(default)]
+    pub variants: Vec<ArticleVariantDocument>,
     pub mode: String,
     pub sources: Vec<SearchResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

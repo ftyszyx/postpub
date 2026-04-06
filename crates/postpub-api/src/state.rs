@@ -1,11 +1,16 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use chrono::Utc;
-use postpub_core::AppContext;
+use postpub_core::{AppContext, GenerationProgressReporter, PostpubError};
 use postpub_types::{
     GenerateArticleRequest, GenerationEvent, GenerationTaskStatus, GenerationTaskSummary,
 };
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -16,20 +21,31 @@ pub struct ApiState {
 
 impl ApiState {
     pub fn new(context: Arc<AppContext>) -> Self {
+        let generation_tasks_file = context.paths().generation_tasks_file();
         Self {
             context,
-            generation_manager: GenerationManager::default(),
+            generation_manager: GenerationManager::new(generation_tasks_file),
         }
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct GenerationManager {
     tasks: Arc<RwLock<HashMap<String, GenerationTaskSummary>>>,
     streams: Arc<RwLock<HashMap<String, broadcast::Sender<GenerationEvent>>>>,
+    storage_path: Arc<PathBuf>,
 }
 
 impl GenerationManager {
+    pub fn new(storage_path: PathBuf) -> Self {
+        let restored = load_persisted_tasks(&storage_path);
+        Self {
+            tasks: Arc::new(RwLock::new(restored)),
+            streams: Arc::new(RwLock::new(HashMap::new())),
+            storage_path: Arc::new(storage_path),
+        }
+    }
+
     pub async fn create_task(
         &self,
         context: Arc<AppContext>,
@@ -48,13 +64,61 @@ impl GenerationManager {
             error: None,
         };
 
-        let (sender, _) = broadcast::channel(64);
         self.tasks.write().await.insert(id.clone(), summary.clone());
-        self.streams
-            .write()
-            .await
-            .insert(id.clone(), sender.clone());
+        self.ensure_stream(&id).await;
+        self.persist_tasks().await;
+        self.spawn_task(context, id.clone(), request);
 
+        summary
+    }
+
+    pub async fn retry_task(
+        &self,
+        context: Arc<AppContext>,
+        id: &str,
+    ) -> postpub_core::Result<GenerationTaskSummary> {
+        let request = {
+            let mut tasks = self.tasks.write().await;
+            let Some(task) = tasks.get_mut(id) else {
+                return Err(PostpubError::NotFound(format!(
+                    "generation task not found: {id}"
+                )));
+            };
+
+            if matches!(
+                task.status,
+                GenerationTaskStatus::Pending | GenerationTaskStatus::Running
+            ) {
+                return Err(PostpubError::Conflict(format!(
+                    "generation task is already running: {id}"
+                )));
+            }
+
+            task.status = GenerationTaskStatus::Pending;
+            task.updated_at = Utc::now();
+            task.output = None;
+            task.error = None;
+            task.request.clone()
+        };
+
+        self.ensure_stream(id).await;
+        self.persist_tasks().await;
+        self.push_event(
+            id,
+            "bootstrap",
+            "收到重试请求，正在重新执行任务",
+            GenerationTaskStatus::Pending,
+        )
+        .await;
+
+        self.spawn_task(context, id.to_string(), request);
+
+        self.get_task(id).await.ok_or_else(|| {
+            PostpubError::NotFound(format!("generation task not found after retry: {id}"))
+        })
+    }
+
+    fn spawn_task(&self, context: Arc<AppContext>, id: String, request: GenerateArticleRequest) {
         let manager = self.clone();
         tracing::info!(
             task_id = %id,
@@ -68,20 +132,38 @@ impl GenerationManager {
                 .push_event(
                     &id,
                     "bootstrap",
-                    "generation task accepted",
-                    GenerationTaskStatus::Running,
-                )
-                .await;
-            manager
-                .push_event(
-                    &id,
-                    "retrieval",
-                    "collecting source material",
+                    "任务已进入执行队列",
                     GenerationTaskStatus::Running,
                 )
                 .await;
 
-            let result = context.generation_service().generate(request).await;
+            let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<(String, String)>();
+            let progress_manager = manager.clone();
+            let progress_task_id = id.clone();
+            let progress_forwarder = tokio::spawn(async move {
+                while let Some((stage, message)) = progress_rx.recv().await {
+                    progress_manager
+                        .push_event(
+                            &progress_task_id,
+                            &stage,
+                            &message,
+                            GenerationTaskStatus::Running,
+                        )
+                        .await;
+                }
+            });
+
+            let reporter = GenerationProgressReporter::new(move |stage, message| {
+                let _ = progress_tx.send((stage, message));
+            });
+            let task_reporter = reporter.clone();
+
+            let result = context
+                .generation_service()
+                .generate_with_progress(request, task_reporter)
+                .await;
+            drop(reporter);
+            let _ = progress_forwarder.await;
             match result {
                 Ok(output) => {
                     tracing::info!(
@@ -93,8 +175,8 @@ impl GenerationManager {
                     manager
                         .push_event(
                             &id,
-                            "compose",
-                            "generation output created",
+                            "finalize",
+                            "生成结果已创建",
                             GenerationTaskStatus::Running,
                         )
                         .await;
@@ -110,8 +192,17 @@ impl GenerationManager {
                 }
             }
         });
+    }
 
-        summary
+    async fn ensure_stream(&self, id: &str) -> broadcast::Sender<GenerationEvent> {
+        let mut streams = self.streams.write().await;
+        if let Some(sender) = streams.get(id) {
+            return sender.clone();
+        }
+
+        let (sender, _) = broadcast::channel(64);
+        streams.insert(id.to_string(), sender.clone());
+        sender
     }
 
     pub async fn list_tasks(&self) -> Vec<GenerationTaskSummary> {
@@ -148,10 +239,11 @@ impl GenerationManager {
                 task.error = None;
             }
         }
+        self.persist_tasks().await;
         self.push_event(
             id,
             "done",
-            "generation completed",
+            "生成完成",
             GenerationTaskStatus::Succeeded,
         )
         .await;
@@ -166,6 +258,7 @@ impl GenerationManager {
                 task.error = Some(error.clone());
             }
         }
+        self.persist_tasks().await;
         self.push_event(id, "failed", &error, GenerationTaskStatus::Failed)
             .await;
     }
@@ -193,9 +286,106 @@ impl GenerationManager {
                 task.events.push(event.clone());
             }
         }
+        self.persist_tasks().await;
 
         if let Some(sender) = self.streams.read().await.get(id) {
             let _ = sender.send(event);
         }
     }
+
+    async fn persist_tasks(&self) {
+        let snapshot = self
+            .tasks
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if let Some(parent) = self.storage_path.parent() {
+            if let Err(error) = fs::create_dir_all(parent) {
+                tracing::error!(
+                    path = %parent.display(),
+                    error = %error,
+                    "failed to create generation task storage directory"
+                );
+                return;
+            }
+        }
+
+        match serde_json::to_string_pretty(&snapshot) {
+            Ok(content) => {
+                if let Err(error) = fs::write(self.storage_path.as_ref(), content) {
+                    tracing::error!(
+                        path = %self.storage_path.display(),
+                        error = %error,
+                        "failed to persist generation tasks"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::error!(
+                    path = %self.storage_path.display(),
+                    error = %error,
+                    "failed to serialize generation tasks"
+                );
+            }
+        }
+    }
+}
+
+fn load_persisted_tasks(path: &Path) -> HashMap<String, GenerationTaskSummary> {
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
+        Err(error) => {
+            tracing::error!(
+                path = %path.display(),
+                error = %error,
+                "failed to read persisted generation tasks"
+            );
+            return HashMap::new();
+        }
+    };
+
+    let tasks = match serde_json::from_str::<Vec<GenerationTaskSummary>>(&content) {
+        Ok(tasks) => tasks,
+        Err(error) => {
+            tracing::error!(
+                path = %path.display(),
+                error = %error,
+                "failed to parse persisted generation tasks"
+            );
+            return HashMap::new();
+        }
+    };
+
+    tasks
+        .into_iter()
+        .map(normalize_restored_task)
+        .map(|task| (task.id.clone(), task))
+        .collect()
+}
+
+fn normalize_restored_task(mut task: GenerationTaskSummary) -> GenerationTaskSummary {
+    if matches!(
+        task.status,
+        GenerationTaskStatus::Pending | GenerationTaskStatus::Running
+    ) {
+        let message = "generation interrupted because the service restarted".to_string();
+        let message = "服务重启导致任务中断".to_string();
+        let timestamp = Utc::now();
+        task.status = GenerationTaskStatus::Failed;
+        task.updated_at = timestamp;
+        task.error = Some(message.clone());
+        task.events.push(GenerationEvent {
+            task_id: task.id.clone(),
+            timestamp,
+            stage: "failed".to_string(),
+            message,
+            status: GenerationTaskStatus::Failed,
+        });
+    }
+
+    task
 }

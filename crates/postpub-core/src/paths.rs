@@ -78,6 +78,10 @@ impl AppPaths {
         self.articles_dir().join("publish_records.json")
     }
 
+    pub fn generation_tasks_file(&self) -> PathBuf {
+        self.articles_dir().join("generation_tasks.json")
+    }
+
     pub fn ensure_directories(&self) -> io::Result<()> {
         for dir in [
             self.app_root.clone(),
@@ -146,6 +150,10 @@ mod tests {
         assert_eq!(
             paths.publish_records_file(),
             PathBuf::from("D:/example/postpub-data/output/article/publish_records.json")
+        );
+        assert_eq!(
+            paths.generation_tasks_file(),
+            PathBuf::from("D:/example/postpub-data/output/article/generation_tasks.json")
         );
         assert_eq!(
             paths.templates_dir(),

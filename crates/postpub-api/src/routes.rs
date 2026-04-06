@@ -63,6 +63,10 @@ pub fn api_router() -> Router<ApiState> {
         )
         .route("/api/generation/tasks/{task_id}", get(get_generation_task))
         .route(
+            "/api/generation/tasks/{task_id}/retry",
+            post(retry_generation_task),
+        )
+        .route(
             "/api/generation/tasks/{task_id}/events",
             get(generation_events),
         )
@@ -278,7 +282,10 @@ async fn get_article_design(
     State(state): State<ApiState>,
     Path(relative_path): Path<String>,
 ) -> Result<Json<ApiResponse<ArticleDesign>>, ApiError> {
-    let design = state.context.article_store().load_article_design(&relative_path)?;
+    let design = state
+        .context
+        .article_store()
+        .load_article_design(&relative_path)?;
     Ok(Json(ApiResponse::ok(design)))
 }
 
@@ -303,7 +310,10 @@ async fn save_article_design(
         .context
         .article_store()
         .save_article_design(&relative_path, &design)?;
-    Ok(Json(ApiResponse::with_message(saved, "article design saved")))
+    Ok(Json(ApiResponse::with_message(
+        saved,
+        "article design saved",
+    )))
 }
 
 async fn delete_article(
@@ -351,6 +361,20 @@ async fn get_generation_task(
         )));
     };
     Ok(Json(ApiResponse::ok(task)))
+}
+
+async fn retry_generation_task(
+    State(state): State<ApiState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<ApiResponse<postpub_types::GenerationTaskSummary>>, ApiError> {
+    let task = state
+        .generation_manager
+        .retry_task(state.context.clone(), &task_id)
+        .await?;
+    Ok(Json(ApiResponse::with_message(
+        task,
+        "generation task restarted",
+    )))
 }
 
 async fn generation_events(

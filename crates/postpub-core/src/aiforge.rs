@@ -5,7 +5,6 @@ use postpub_types::{AiforgeConfig, SearchResult};
 use reqwest::{header, Client, Url};
 use rss::Channel;
 use scraper::{Html, Selector};
-use tracing::warn;
 
 use crate::error::{PostpubError, Result};
 
@@ -28,21 +27,10 @@ impl AiforgeEngine {
         max_results: usize,
     ) -> Result<(String, Vec<SearchResult>)> {
         let results = if reference_urls.is_empty() {
-            match self.search_news(topic, max_results).await {
-                Ok(results) => ("search".to_string(), results),
-                Err(error) => {
-                    warn!(
-                        topic = topic,
-                        provider = self.active_search_provider(),
-                        error = %error,
-                        "source retrieval failed, falling back to topic brief mode"
-                    );
-                    (
-                        "fallback".to_string(),
-                        self.build_topic_brief_sources(topic, min_results, max_results),
-                    )
-                }
-            }
+            (
+                "search".to_string(),
+                self.search_news(topic, max_results).await?,
+            )
         } else {
             (
                 "reference".to_string(),
@@ -65,6 +53,15 @@ impl AiforgeEngine {
             .take(max_results)
             .collect::<Vec<_>>();
 
+        if filtered.is_empty() {
+            let message = if reference_urls.is_empty() {
+                format!("no usable search results were collected for '{topic}'; check the search provider or network connectivity")
+            } else {
+                format!("no usable content could be extracted from the provided reference URLs for '{topic}'")
+            };
+            return Err(PostpubError::Validation(message));
+        }
+
         if filtered.len() < min_results {
             return Err(PostpubError::Validation(format!(
                 "not enough sources found for '{topic}': expected at least {min_results}, got {}",
@@ -78,14 +75,17 @@ impl AiforgeEngine {
     pub async fn search_news(&self, topic: &str, max_results: usize) -> Result<Vec<SearchResult>> {
         match self.active_search_provider() {
             "google_news_rss" => self.search_google_news(topic, max_results).await,
-            "topic_brief" => Ok(self.build_topic_brief_sources(topic, 1, max_results)),
             provider => Err(PostpubError::Validation(format!(
                 "unsupported search provider: {provider}"
             ))),
         }
     }
 
-    async fn search_google_news(&self, topic: &str, max_results: usize) -> Result<Vec<SearchResult>> {
+    async fn search_google_news(
+        &self,
+        topic: &str,
+        max_results: usize,
+    ) -> Result<Vec<SearchResult>> {
         let mut url = Url::parse("https://news.google.com/rss/search")?;
         let locale = normalize_locale(&self.config.search.locale);
         url.query_pairs_mut()
@@ -130,7 +130,9 @@ impl AiforgeEngine {
                 .client
                 .get(url)
                 .header(header::USER_AGENT, self.config.fetcher.user_agent.as_str())
-                .timeout(Duration::from_secs(self.config.fetcher.request_timeout_secs))
+                .timeout(Duration::from_secs(
+                    self.config.fetcher.request_timeout_secs,
+                ))
                 .send()
                 .await?
                 .error_for_status()?
@@ -154,66 +156,6 @@ impl AiforgeEngine {
         } else {
             provider
         }
-    }
-
-    fn build_topic_brief_sources(
-        &self,
-        topic: &str,
-        min_results: usize,
-        max_results: usize,
-    ) -> Vec<SearchResult> {
-        let count = min_results.max(1).min(max_results.max(1));
-        let trimmed_topic = topic.trim();
-        let headline = if trimmed_topic.is_empty() {
-            "untitled topic"
-        } else {
-            trimmed_topic
-        };
-        let sections = [
-            (
-                "Topic snapshot",
-                "Summarize the core idea, define the scope, and explain why the topic matters right now.",
-            ),
-            (
-                "Audience questions",
-                "List the main questions a reader would expect this article to answer and turn them into subheadings.",
-            ),
-            (
-                "Practical angle",
-                "Describe examples, workflows, or trade-offs that make the topic concrete and useful.",
-            ),
-            (
-                "Risks and caveats",
-                "Call out uncertainty, missing evidence, and places where manual verification is still needed.",
-            ),
-            (
-                "Next steps",
-                "Suggest follow-up research directions, comparisons, and examples to strengthen the next draft.",
-            ),
-        ];
-
-        (0..count)
-            .map(|index| {
-                let section = sections.get(index).copied().unwrap_or((
-                    "Additional perspective",
-                    "Add another angle that expands the article without repeating earlier sections.",
-                ));
-
-                SearchResult {
-                    title: format!("{}: {}", headline, section.0),
-                    url: format!("about:blank#postpub-fallback-{}", index + 1),
-                    abstract_text: format!(
-                        "External news retrieval is unavailable, so this draft uses an internal topic brief. {}",
-                        section.1
-                    ),
-                    published_at: Some(Utc::now().format("%Y-%m-%d").to_string()),
-                    content: Some(format!(
-                        "Topic: {headline}\nSection: {}\nGuidance: {}\nNote: Replace this fallback brief with verified external sources when network access becomes available.",
-                        section.0, section.1
-                    )),
-                }
-            })
-            .collect()
     }
 }
 
@@ -443,8 +385,8 @@ mod tests {
             .contains("Paragraph one"));
     }
 
-    #[test]
-    fn falls_back_to_topic_brief_sources() {
+    #[tokio::test]
+    async fn returns_error_for_unsupported_search_provider() {
         let engine = AiforgeEngine::new(
             Client::new(),
             AiforgeConfig {
@@ -459,13 +401,11 @@ mod tests {
             },
         );
 
-        let results = engine.build_topic_brief_sources("vicoding", 3, 8);
-
-        assert_eq!(results.len(), 3);
-        assert!(results.iter().all(|item| item.title.contains("vicoding")));
-        assert!(results
-            .iter()
-            .all(|item| item.abstract_text.contains("External news retrieval is unavailable")));
+        let error = engine
+            .search_news("vicoding", 8)
+            .await
+            .expect_err("search should fail");
+        assert!(error.to_string().contains("unsupported search provider"));
     }
 
     #[test]

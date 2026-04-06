@@ -9,6 +9,21 @@ import {
 import type { ArticleDocument, ArticleSummary } from "../types/postpub";
 import { translate } from "../utils/i18n";
 
+function normalizeArticleSummary(article: ArticleSummary): ArticleSummary {
+  return {
+    ...article,
+    variant_count: article.variant_count ?? 0
+  };
+}
+
+function normalizeArticleDocument(article: ArticleDocument): ArticleDocument {
+  return {
+    ...article,
+    summary: normalizeArticleSummary(article.summary),
+    variants: article.variants ?? []
+  };
+}
+
 export const useArticleStore = defineStore("articles", {
   state: () => ({
     articles: [] as ArticleSummary[],
@@ -27,7 +42,7 @@ export const useArticleStore = defineStore("articles", {
 
       try {
         const response = await apiGet<ApiResponse<ArticleSummary[]>>("/api/articles");
-        this.articles = response.data;
+        this.articles = response.data.map(normalizeArticleSummary);
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error);
       } finally {
@@ -43,7 +58,7 @@ export const useArticleStore = defineStore("articles", {
         const response = await apiGet<ApiResponse<ArticleDocument>>(
           `/api/articles/${encodePathSegments(relativePath)}`
         );
-        this.current = response.data;
+        this.current = normalizeArticleDocument(response.data);
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error);
       } finally {
@@ -64,7 +79,7 @@ export const useArticleStore = defineStore("articles", {
           `/api/articles/${encodePathSegments(this.current.summary.relative_path)}`,
           { content: this.current.content }
         );
-        this.current = response.data;
+        this.current = normalizeArticleDocument(response.data);
         this.lastMessage = translate("messages.articles.saved");
         await this.loadAll();
       } catch (error) {

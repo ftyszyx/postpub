@@ -10,8 +10,8 @@ use axum::{
 use postpub_api::build_router;
 use postpub_core::AppContext;
 use postpub_types::{
-    ApiResponse, ArticleDesign, ConfigBundle, GenerateArticleRequest, GenerationTaskStatus,
-    GenerationTaskSummary, TemplateDocument,
+    ApiResponse, ArticleDesign, ConfigBundle, CustomLlmProvider, GenerateArticleRequest,
+    GenerationTaskStatus, GenerationTaskSummary, TemplateDocument,
 };
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -36,6 +36,50 @@ async fn json_response<T: serde::de::DeserializeOwned>(
     (status, payload)
 }
 
+fn configure_mock_llm(context: &Arc<AppContext>, api_base: String) {
+    let mut bundle = context.config_store().load_bundle().expect("load bundle");
+    bundle.ui_config.custom_llm_providers = vec![CustomLlmProvider {
+        name: "Mock LLM".to_string(),
+        api_key: "test-key".to_string(),
+        api_base,
+        model: "mock-model".to_string(),
+        protocol_type: "openai".to_string(),
+        enabled: true,
+        ..CustomLlmProvider::default()
+    }];
+    context
+        .config_store()
+        .save_ui_config(&bundle.ui_config)
+        .expect("save ui config");
+}
+
+async fn wait_for_task_completion(app: &Router, task_id: &str) -> GenerationTaskSummary {
+    let mut final_task = None;
+    for _ in 0..40 {
+        let (status, task): (StatusCode, ApiResponse<GenerationTaskSummary>) = json_response(
+            app,
+            Request::builder()
+                .uri(format!("/api/generation/tasks/{task_id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        if matches!(
+            task.data.status,
+            GenerationTaskStatus::Succeeded | GenerationTaskStatus::Failed
+        ) {
+            final_task = Some(task.data);
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    final_task.expect("generation task completed")
+}
+
 #[tokio::test]
 async fn config_endpoints_roundtrip() {
     let (app, _, _temp) = test_app();
@@ -57,6 +101,7 @@ async fn config_endpoints_roundtrip() {
     bundle.data.config.img_api.api_type = "ali".to_string();
     bundle.data.config.img_api.ali.api_key = "ali-key".to_string();
     bundle.data.config.img_api.ali.model = "wanx2.1-t2i-plus".to_string();
+    bundle.data.ui_config.custom_llm_providers[0].api_key = "llm-key".to_string();
 
     let (status, saved): (StatusCode, ApiResponse<ConfigBundle>) = json_response(
         &app,
@@ -75,6 +120,10 @@ async fn config_endpoints_roundtrip() {
     assert_eq!(saved.data.config.aiforge_search_min_results, 1);
     assert_eq!(saved.data.config.img_api.api_type, "ali");
     assert_eq!(saved.data.config.img_api.ali.api_key, "ali-key");
+    assert_eq!(
+        saved.data.ui_config.custom_llm_providers[0].api_key,
+        bundle.data.ui_config.custom_llm_providers[0].api_key
+    );
 }
 
 #[tokio::test]
@@ -180,7 +229,7 @@ async fn template_and_article_endpoints_work() {
 
 #[tokio::test]
 async fn generation_task_succeeds_with_reference_urls() {
-    let (app, _context, _temp) = test_app();
+    let (app, context, _temp) = test_app();
 
     let reference_app = Router::new().route(
         "/reference",
@@ -213,16 +262,44 @@ async fn generation_task_succeeds_with_reference_urls() {
             .expect("serve reference");
     });
 
+    let llm_app = Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async {
+            axum::Json(serde_json::json!({
+                "choices": [
+                    {
+                        "message": {
+                            "content": "# Rust workflow\n\n这是一篇用于测试的中文文章。"
+                        }
+                    }
+                ]
+            }))
+        }),
+    );
+    let llm_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind llm listener");
+    let llm_addr = llm_listener.local_addr().expect("llm addr");
+    let llm_server = tokio::spawn(async move {
+        axum::serve(llm_listener, llm_app).await.expect("serve llm");
+    });
+
+    configure_mock_llm(&context, format!("http://{llm_addr}/v1"));
+    let mut bundle = context.config_store().load_bundle().expect("load bundle");
+    bundle.config.publish_targets.clear();
+    context
+        .config_store()
+        .save_config(&bundle.config)
+        .expect("save config");
+
     let reference_url = format!("http://{addr}/reference");
     let request = GenerateArticleRequest {
         topic: "Rust workflow".to_string(),
-        platform: "web".to_string(),
         reference_urls: vec![
             reference_url.clone(),
             reference_url.clone(),
             reference_url.clone(),
         ],
-        reference_ratio: 0.4,
         template_category: Some("general".to_string()),
         template_name: Some("magazine".to_string()),
         save_output: true,
@@ -243,32 +320,9 @@ async fn generation_task_succeeds_with_reference_urls() {
     assert_eq!(status, StatusCode::OK);
 
     let task_id = created.data.id;
-    let mut final_task = None;
-    for _ in 0..40 {
-        let (status, task): (StatusCode, ApiResponse<GenerationTaskSummary>) = json_response(
-            &app,
-            Request::builder()
-                .uri(format!("/api/generation/tasks/{task_id}"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-
-        if matches!(
-            task.data.status,
-            GenerationTaskStatus::Succeeded | GenerationTaskStatus::Failed
-        ) {
-            final_task = Some(task.data);
-            break;
-        }
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
+    let task = wait_for_task_completion(&app, &task_id).await;
     server.abort();
-
-    let task = final_task.expect("generation task completed");
+    llm_server.abort();
     assert_eq!(task.status, GenerationTaskStatus::Succeeded);
     let output = task.output.expect("generation output");
     assert_eq!(output.mode, "reference");
@@ -278,11 +332,36 @@ async fn generation_task_succeeds_with_reference_urls() {
 }
 
 #[tokio::test]
-async fn generation_task_falls_back_when_search_provider_is_unavailable() {
+async fn generation_task_succeeds_in_topic_mode_without_reference_urls() {
     let (app, context, _temp) = test_app();
+
+    let llm_app = Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async {
+            axum::Json(serde_json::json!({
+                "choices": [
+                    {
+                        "message": {
+                            "content": "# vicoding\n\n这是一篇用于测试纯主题生成模式的中文文章。"
+                        }
+                    }
+                ]
+            }))
+        }),
+    );
+    let llm_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind llm listener");
+    let llm_addr = llm_listener.local_addr().expect("llm addr");
+    let llm_server = tokio::spawn(async move {
+        axum::serve(llm_listener, llm_app).await.expect("serve llm");
+    });
+
+    configure_mock_llm(&context, format!("http://{llm_addr}/v1"));
 
     let mut bundle = context.config_store().load_bundle().expect("load bundle");
     bundle.config.aiforge_search_min_results = 2;
+    bundle.config.publish_targets.clear();
     bundle.aiforge_config.default_search_provider = "unknown-provider".to_string();
     bundle.aiforge_config.search.provider = "unknown-provider".to_string();
     context
@@ -296,9 +375,7 @@ async fn generation_task_falls_back_when_search_provider_is_unavailable() {
 
     let request = GenerateArticleRequest {
         topic: "vicoding".to_string(),
-        platform: String::new(),
         reference_urls: vec![],
-        reference_ratio: 0.0,
         template_category: Some("general".to_string()),
         template_name: Some("magazine".to_string()),
         save_output: false,
@@ -319,33 +396,190 @@ async fn generation_task_falls_back_when_search_provider_is_unavailable() {
     assert_eq!(status, StatusCode::OK);
 
     let task_id = created.data.id;
-    let mut final_task = None;
-    for _ in 0..40 {
-        let (status, task): (StatusCode, ApiResponse<GenerationTaskSummary>) = json_response(
-            &app,
-            Request::builder()
-                .uri(format!("/api/generation/tasks/{task_id}"))
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
+    let task = wait_for_task_completion(&app, &task_id).await;
+    llm_server.abort();
 
-        if matches!(
-            task.data.status,
-            GenerationTaskStatus::Succeeded | GenerationTaskStatus::Failed
-        ) {
-            final_task = Some(task.data);
-            break;
-        }
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    let task = final_task.expect("generation task completed");
     assert_eq!(task.status, GenerationTaskStatus::Succeeded);
+    assert!(task.error.is_none());
     let output = task.output.expect("generation output");
-    assert_eq!(output.mode, "fallback");
-    assert_eq!(output.sources.len(), 2);
-    assert!(output.content.contains("External news retrieval is unavailable"));
+    assert_eq!(output.mode, "topic");
+    assert!(output.sources.is_empty());
+    assert!(output.preview_html.contains("vicoding"));
+    assert!(output.article.is_none());
+}
+
+#[tokio::test]
+async fn generation_task_fails_when_llm_api_key_is_missing() {
+    let (app, _context, _temp) = test_app();
+
+    let request = GenerateArticleRequest {
+        topic: "vicoding".to_string(),
+        reference_urls: vec![],
+        template_category: Some("general".to_string()),
+        template_name: Some("magazine".to_string()),
+        save_output: false,
+    };
+
+    let (status, created): (StatusCode, ApiResponse<GenerationTaskSummary>) = json_response(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/generation/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&request).expect("serialize request"),
+            ))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let task = wait_for_task_completion(&app, &created.data.id).await;
+    assert_eq!(task.status, GenerationTaskStatus::Failed);
+    assert!(task
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("fill api_key"));
+}
+
+#[tokio::test]
+async fn generation_tasks_are_restored_after_restart() {
+    let (app, context, temp) = test_app();
+
+    let request = GenerateArticleRequest {
+        topic: "vicoding".to_string(),
+        reference_urls: vec![],
+        template_category: Some("general".to_string()),
+        template_name: Some("magazine".to_string()),
+        save_output: false,
+    };
+
+    let (status, created): (StatusCode, ApiResponse<GenerationTaskSummary>) = json_response(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/generation/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&request).expect("serialize request"),
+            ))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let finished = wait_for_task_completion(&app, &created.data.id).await;
+    assert_eq!(finished.status, GenerationTaskStatus::Failed);
+
+    drop(app);
+    drop(context);
+
+    let restarted_context = Arc::new(AppContext::from_root("postpub-api", "0.1.0", temp.path()));
+    restarted_context.bootstrap().expect("bootstrap restart");
+    let restarted_app = build_router(restarted_context);
+
+    let (status, tasks): (StatusCode, ApiResponse<Vec<GenerationTaskSummary>>) = json_response(
+        &restarted_app,
+        Request::builder()
+            .uri("/api/generation/tasks")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tasks.data.len(), 1);
+    assert_eq!(tasks.data[0].id, finished.id);
+    assert_eq!(tasks.data[0].status, GenerationTaskStatus::Failed);
+}
+
+#[tokio::test]
+async fn generation_task_retry_reuses_existing_task_id() {
+    let (app, context, _temp) = test_app();
+
+    let request = GenerateArticleRequest {
+        topic: "vicoding".to_string(),
+        reference_urls: vec![],
+        template_category: Some("general".to_string()),
+        template_name: Some("magazine".to_string()),
+        save_output: false,
+    };
+
+    let (status, created): (StatusCode, ApiResponse<GenerationTaskSummary>) = json_response(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/generation/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&request).expect("serialize request"),
+            ))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let failed = wait_for_task_completion(&app, &created.data.id).await;
+    assert_eq!(failed.status, GenerationTaskStatus::Failed);
+
+    let llm_app = Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async {
+            axum::Json(serde_json::json!({
+                "choices": [
+                    {
+                        "message": {
+                            "content": "# vicoding\n\n这是一篇用于测试同任务重试的中文文章。"
+                        }
+                    }
+                ]
+            }))
+        }),
+    );
+    let llm_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind llm listener");
+    let llm_addr = llm_listener.local_addr().expect("llm addr");
+    let llm_server = tokio::spawn(async move {
+        axum::serve(llm_listener, llm_app).await.expect("serve llm");
+    });
+
+    configure_mock_llm(&context, format!("http://{llm_addr}/v1"));
+    let mut bundle = context.config_store().load_bundle().expect("load bundle");
+    bundle.config.publish_targets.clear();
+    context
+        .config_store()
+        .save_config(&bundle.config)
+        .expect("save config");
+
+    let (status, retried): (StatusCode, ApiResponse<GenerationTaskSummary>) = json_response(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/generation/tasks/{}/retry", failed.id))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(retried.data.id, failed.id);
+
+    let succeeded = wait_for_task_completion(&app, &failed.id).await;
+    llm_server.abort();
+
+    assert_eq!(succeeded.status, GenerationTaskStatus::Succeeded);
+    let output = succeeded.output.expect("generation output");
+    assert_eq!(output.mode, "topic");
+
+    let (status, tasks): (StatusCode, ApiResponse<Vec<GenerationTaskSummary>>) = json_response(
+        &app,
+        Request::builder()
+            .uri("/api/generation/tasks")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tasks.data.len(), 1);
+    assert_eq!(tasks.data[0].id, failed.id);
 }

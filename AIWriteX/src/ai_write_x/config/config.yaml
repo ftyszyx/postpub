@@ -167,13 +167,15 @@ api:
     max_tokens: 32768
   Custom:
     key: CUSTOM_API_KEY
-    key_index: 0
+    key_index: 2
     api_key:
       - sk-e522b68b32c4fe9f7caa791528e075f792b24003604725e8e749cfe62cb9d37b
+      - sk-1e6e8d0e11fd435e55673e28e428e75d813ef6d64edaddf5befc716c0d6a6e91
+      - sk-a0ae1b799c684c61e4666f25547738d32e5543182358a1161f63632f74bb4695
     model_index: 0
     model:
       - gpt-5.4
-    api_base: https://www.heiyucode.com/v1
+    api_base: https://sub2api.1postpro.com/v1
     protocol_type: openai
     max_tokens: 8192
 img_api:

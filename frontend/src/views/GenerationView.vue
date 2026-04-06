@@ -28,12 +28,9 @@ const isGenerating = computed(
 );
 
 const orderedEvents = computed(() => [...(currentTask.value?.events ?? [])].reverse());
-const referenceRatioPercent = computed({
-  get: () => Math.round((generationStore.form.reference_ratio || 0) * 100),
-  set: (value: number) => {
-    generationStore.form.reference_ratio = Number(value) / 100;
-  }
-});
+const currentTaskError = computed(
+  () => currentTask.value?.error || generationStore.error || ""
+);
 
 const progressWidth = computed(() => {
   const status = currentTask.value?.status;
@@ -62,6 +59,24 @@ function syncReferenceUrls() {
 
 function taskStatusLabel(status: GenerationTaskStatus) {
   return t(`generation.taskStatus.${status}`);
+}
+
+function stageLabel(stage: string) {
+  const knownStages = new Set([
+    "bootstrap",
+    "prepare",
+    "provider",
+    "retrieval",
+    "draft",
+    "variant",
+    "save",
+    "finalize",
+    "done",
+    "failed",
+  ]);
+  return knownStages.has(stage)
+    ? t(`generation.stages.${stage}`)
+    : t("generation.stages.unknown", { stage });
 }
 
 function toggleReferenceMode() {
@@ -238,16 +253,6 @@ onBeforeUnmount(() => {
               </select>
             </label>
 
-            <label class="aiw-form-group">
-              <span>{{ t("generation.fields.referenceRatio") }}</span>
-              <select v-model="referenceRatioPercent" class="aiw-form-select">
-                <option :value="10">10%</option>
-                <option :value="20">20%</option>
-                <option :value="30">30%</option>
-                <option :value="50">50%</option>
-                <option :value="75">75%</option>
-              </select>
-            </label>
           </div>
 
           <label class="aiw-form-group">
@@ -302,10 +307,14 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <div v-if="currentTaskError" class="aiw-log-error">
+            {{ currentTaskError }}
+          </div>
+
           <div v-if="orderedEvents.length" class="aiw-logs-output">
             <div v-for="event in orderedEvents" :key="`${event.timestamp}-${event.stage}-${event.message}`" class="aiw-log-entry">
               <div class="aiw-log-entry-header">
-                <strong>{{ event.stage }}</strong>
+                <strong>{{ stageLabel(event.stage) }}</strong>
                 <span>{{ taskStatusLabel(event.status) }}</span>
                 <time>{{ event.timestamp }}</time>
               </div>
@@ -313,8 +322,8 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div v-else-if="generationStore.error" class="aiw-logs-empty">
-            {{ generationStore.error }}
+          <div v-else-if="currentTaskError" class="aiw-logs-empty">
+            {{ currentTaskError }}
           </div>
 
           <div v-else class="aiw-logs-empty">
@@ -776,6 +785,17 @@ onBeforeUnmount(() => {
   max-height: 340px;
   overflow: auto;
   padding-right: 4px;
+}
+
+.aiw-log-error {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
 }
 
 .aiw-log-entry {

@@ -5,7 +5,7 @@ import { useI18n } from "vue-i18n";
 import { apiDelete, apiGet, encodePathSegments, type ApiResponse } from "../api/client";
 import { useArticleStore } from "../stores/articles";
 import { useConfigStore } from "../stores/config";
-import type { ArticleDocument, ArticleSummary } from "../types/postpub";
+import type { ArticleDocument, ArticleSummary, ArticleVariantDocument } from "../types/postpub";
 import { decoratePreviewDocument } from "../utils/preview";
 
 type ArticleLayout = "grid" | "list";
@@ -42,7 +42,7 @@ const filteredArticles = computed(() => {
       return true;
     }
 
-    return [article.title, article.name, article.relative_path, article.format]
+    return [article.title, article.name, article.relative_path, article.format, String(article.variant_count || 0)]
       .filter(Boolean)
       .some((value) => value.toLowerCase().includes(keyword));
   });
@@ -77,6 +77,17 @@ const articleEditorPreviewDocument = computed(() => {
   const source = buildArticlePreviewSource(articleEditorDraft.value, articleStore.current.summary.format);
   return decoratePreviewDocument(source, configStore.designSurface, title);
 });
+
+function buildVariantPreviewDocument(variant: ArticleVariantDocument) {
+  const articleTitle =
+    articleStore.current?.summary.title || articleStore.current?.summary.name || t("articles.previewTitle");
+  const source = variant.preview_html || buildArticlePreviewSource(variant.content, variant.summary.format);
+  return decoratePreviewDocument(
+    source,
+    configStore.designSurface,
+    `${articleTitle} - ${variant.summary.target_name}`
+  );
+}
 
 function normalizeStatus(status: string) {
   const normalized = status.toLowerCase();
@@ -451,6 +462,8 @@ if (!articleStore.articles.length && !articleStore.loading) {
                   <span>{{ formatBytes(article.size_bytes) }}</span>
                   <span class="aiw-meta-divider">•</span>
                   <span>{{ formatRelativeTime(article.updated_at) }}</span>
+                  <span v-if="article.variant_count" class="aiw-meta-divider">/</span>
+                  <span v-if="article.variant_count">{{ t("articles.variantCount", { count: article.variant_count }) }}</span>
                 </div>
               </div>
 
@@ -514,12 +527,53 @@ if (!articleStore.articles.length && !articleStore.loading) {
           <span>{{ t("common.path") }}: {{ articleStore.current.summary.relative_path }}</span>
           <span>{{ t("common.format") }}: {{ articleStore.current.summary.format }}</span>
           <span>{{ t("common.status") }}: {{ statusText(articleStore.current.summary.status) }}</span>
+          <span>{{ t("articles.variantCount", { count: articleStore.current.variants.length }) }}</span>
         </div>
 
         <div class="aiw-article-editor-body">
           <textarea v-model="articleEditorDraft" class="aiw-article-editor-textarea" spellcheck="false"></textarea>
           <iframe class="aiw-article-editor-preview" :srcdoc="articleEditorPreviewDocument" :title="t('articles.previewTitle')"></iframe>
         </div>
+
+        <section class="aiw-article-variants">
+          <div class="aiw-article-variants__header">
+            <h4>{{ t("articles.variantsTitle") }}</h4>
+            <span>{{ t("articles.variantCount", { count: articleStore.current.variants.length }) }}</span>
+          </div>
+
+          <div v-if="articleStore.current.variants.length" class="aiw-article-variant-list">
+            <article
+              v-for="variant in articleStore.current.variants"
+              :key="`${variant.summary.target_id}-${variant.summary.format}`"
+              class="aiw-article-variant-card"
+            >
+              <div class="aiw-article-variant-card__header">
+                <div>
+                  <strong>{{ variant.summary.target_name }}</strong>
+                  <p>{{ variant.summary.platform_type }}</p>
+                </div>
+                <div class="aiw-card-meta">
+                  <span class="aiw-format-badge">{{ variant.summary.format }}</span>
+                  <span>{{ formatBytes(variant.summary.size_bytes) }}</span>
+                  <span>{{ formatRelativeTime(variant.summary.updated_at) }}</span>
+                </div>
+              </div>
+
+              <div class="aiw-article-variant-card__body">
+                <textarea :value="variant.content" class="aiw-article-variant-textarea" readonly spellcheck="false"></textarea>
+                <iframe
+                  class="aiw-article-variant-preview"
+                  :srcdoc="buildVariantPreviewDocument(variant)"
+                  :title="`${variant.summary.target_name} ${t('articles.previewTitle')}`"
+                ></iframe>
+              </div>
+            </article>
+          </div>
+
+          <div v-else class="aiw-empty-state aiw-empty-state--compact">
+            {{ t("articles.noVariants") }}
+          </div>
+        </section>
       </div>
     </div>
 
@@ -962,6 +1016,10 @@ if (!articleStore.articles.length && !articleStore.loading) {
   text-align: center;
 }
 
+.aiw-empty-state--compact {
+  padding: 20px;
+}
+
 .aiw-article-editor-modal {
   width: min(1120px, 96vw);
   display: flex;
@@ -989,6 +1047,74 @@ if (!articleStore.articles.length && !articleStore.loading) {
   grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
   gap: 16px;
   min-height: 62vh;
+}
+
+.aiw-article-variants {
+  display: grid;
+  gap: 14px;
+}
+
+.aiw-article-variants__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.aiw-article-variants__header h4 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--aiw-ink);
+}
+
+.aiw-article-variant-list {
+  display: grid;
+  gap: 14px;
+}
+
+.aiw-article-variant-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--aiw-border);
+  border-radius: 12px;
+  background: #fbfdff;
+}
+
+.aiw-article-variant-card__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.aiw-article-variant-card__header p {
+  margin: 4px 0 0;
+  color: var(--aiw-ink-soft);
+  text-transform: capitalize;
+}
+
+.aiw-article-variant-card__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+  gap: 14px;
+}
+
+.aiw-article-variant-textarea,
+.aiw-article-variant-preview {
+  width: 100%;
+  min-height: 260px;
+  border: 1px solid var(--aiw-border);
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.aiw-article-variant-textarea {
+  padding: 14px;
+  resize: none;
+  color: var(--aiw-ink);
+  font: inherit;
+  line-height: 1.6;
 }
 
 .aiw-article-editor-textarea {
@@ -1028,6 +1154,10 @@ if (!articleStore.articles.length && !articleStore.loading) {
   }
 
   .aiw-article-editor-body {
+    grid-template-columns: 1fr;
+  }
+
+  .aiw-article-variant-card__body {
     grid-template-columns: 1fr;
   }
 }
