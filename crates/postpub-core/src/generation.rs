@@ -65,10 +65,7 @@ impl GenerationService {
         let provider = select_generation_provider(&bundle.ui_config)?;
         progress.report(
             "provider",
-            format!(
-                "正在校验 LLM 提供商 '{}'",
-                provider_display_name(&provider)
-            ),
+            format!("正在校验 LLM 提供商 '{}'", provider_display_name(&provider)),
         );
         let api_key = resolve_provider_api_key(&provider)?;
 
@@ -83,16 +80,10 @@ impl GenerationService {
 
         let engine = AiforgeEngine::new(self.context.http_client().clone(), bundle.aiforge_config);
         let (mode, sources) = if request.reference_urls.is_empty() {
-            progress.report(
-                "retrieval",
-                "未提供参考链接，跳过联网搜索，直接按主题生成",
-            );
+            progress.report("retrieval", "未提供参考链接，跳过联网搜索，直接按主题生成");
             ("topic".to_string(), Vec::new())
         } else {
-            progress.report(
-                "retrieval",
-                "正在抓取参考链接内容",
-            );
+            progress.report("retrieval", "正在抓取参考链接内容");
             let (mode, sources) = engine
                 .collect_sources(
                     &request.topic,
@@ -136,10 +127,7 @@ impl GenerationService {
             &progress,
         )
         .await?;
-        progress.report(
-            "variant",
-            format!("已生成 {} 个发布稿变体", variants.len()),
-        );
+        progress.report("variant", format!("已生成 {} 个发布稿变体", variants.len()));
 
         let article = if request.save_output {
             progress.report("save", "正在保存源文章");

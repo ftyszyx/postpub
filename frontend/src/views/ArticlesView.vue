@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
 import { marked } from "marked";
 import { useI18n } from "vue-i18n";
 import { apiDelete, apiGet, encodePathSegments, type ApiResponse } from "../api/client";
+import TemplateMonacoEditor from "../components/TemplateMonacoEditor.vue";
 import { useArticleStore } from "../stores/articles";
 import { useConfigStore } from "../stores/config";
 import type { ArticleDocument, ArticleSummary, ArticleVariantDocument } from "../types/postpub";
@@ -22,9 +23,18 @@ const batchMode = ref(false);
 const selectedPaths = ref<string[]>([]);
 const articleEditorOpen = ref(false);
 const articleEditorDraft = ref("");
+const articleEditorSelectedSourceKey = ref("original");
+const articleMonacoEditor = ref<{ focus: () => void } | null>(null);
+const articleEditorWorkspace = ref<HTMLElement | null>(null);
+const articleEditorPreviewRefreshKey = ref(0);
+const articleEditorFullscreen = ref(false);
+const articleEditorCursor = reactive({ line: 1, column: 1 });
+const articleEditorCodePanelWidth = ref(0.68);
 
 const previewHtmlMap = reactive<Record<string, string>>({});
 const previewStateMap = reactive<Record<string, "idle" | "loading" | "ready" | "error">>({});
+
+let articleEditorResizeCleanup: (() => void) | null = null;
 
 const sortedArticles = computed(() =>
   [...articleStore.articles].sort((left, right) => right.updated_at.localeCompare(left.updated_at))
@@ -71,8 +81,68 @@ const statusOptions = computed(() => [
   }
 ]);
 
+const articleEditorSourceOptions = computed(() => {
+  const current = articleStore.current;
+  if (!current) return [];
+
+  return [
+    {
+      key: "original",
+      label: t("articles.originalVersion"),
+      kind: "original" as const,
+      format: current.summary.format
+    },
+    ...current.variants.map((variant) => ({
+      key: buildVariantSourceKey(variant),
+      label: t("articles.variantOptionLabel", {
+        target: variant.summary.target_name,
+        format: variant.summary.format
+      }),
+      kind: "variant" as const,
+      format: variant.summary.format
+    }))
+  ];
+});
+
+const articleEditorActiveVariant = computed(() => {
+  const current = articleStore.current;
+  if (!current || articleEditorSelectedSourceKey.value === "original") return null;
+
+  return (
+    current.variants.find((variant) => buildVariantSourceKey(variant) === articleEditorSelectedSourceKey.value) ?? null
+  );
+});
+
+const articleEditorActiveSource = computed(() => {
+  const selected = articleEditorSourceOptions.value.find((option) => option.key === articleEditorSelectedSourceKey.value);
+  return selected ?? articleEditorSourceOptions.value[0] ?? null;
+});
+
+const articleEditorActiveSourceLabel = computed(() => articleEditorActiveSource.value?.label || t("articles.originalVersion"));
+
+const articleEditorIsReadonly = computed(() => Boolean(articleEditorActiveVariant.value));
+
+const articleEditorContent = computed({
+  get() {
+    return articleEditorActiveVariant.value?.content ?? articleEditorDraft.value;
+  },
+  set(value: string) {
+    if (!articleEditorIsReadonly.value) {
+      articleEditorDraft.value = value;
+    }
+  }
+});
+
+const articleEditorLanguage = computed<"html" | "markdown" | "plaintext">(() =>
+  normalizeEditorLanguage(articleEditorActiveSource.value?.format || articleStore.current?.summary.format || "html")
+);
+
 const articleEditorPreviewDocument = computed(() => {
   if (!articleStore.current) return "";
+  if (articleEditorActiveVariant.value) {
+    return buildVariantPreviewDocument(articleEditorActiveVariant.value);
+  }
+
   const title = articleStore.current.summary.title || articleStore.current.summary.name || t("articles.previewTitle");
   const source = buildArticlePreviewSource(articleEditorDraft.value, articleStore.current.summary.format);
   return decoratePreviewDocument(source, configStore.designSurface, title);
@@ -87,6 +157,23 @@ function buildVariantPreviewDocument(variant: ArticleVariantDocument) {
     configStore.designSurface,
     `${articleTitle} - ${variant.summary.target_name}`
   );
+}
+
+function buildVariantSourceKey(variant: ArticleVariantDocument) {
+  return `variant:${variant.summary.target_id}:${variant.summary.format}`;
+}
+
+function normalizeEditorLanguage(format: string) {
+  const normalized = format.toLowerCase();
+  if (normalized.includes("markdown") || normalized === "md") {
+    return "markdown";
+  }
+
+  if (normalized.includes("text") || normalized === "txt") {
+    return "plaintext";
+  }
+
+  return "html";
 }
 
 function normalizeStatus(status: string) {
@@ -219,20 +306,113 @@ async function openArticleEditor(relativePath: string) {
   await articleStore.open(relativePath);
   if (!articleStore.current) return;
   articleEditorDraft.value = articleStore.current.content;
+  articleEditorSelectedSourceKey.value = "original";
+  articleEditorPreviewRefreshKey.value += 1;
+  resetArticleEditorViewport();
   articleEditorOpen.value = true;
 }
 
 function closeArticleEditor() {
   articleEditorOpen.value = false;
+  articleEditorFullscreen.value = false;
 }
 
 async function saveArticleEditor() {
-  if (!articleStore.current) return;
+  if (!articleStore.current || articleEditorIsReadonly.value) return;
   articleStore.current.content = articleEditorDraft.value;
   await articleStore.saveCurrent();
   if (!articleStore.error) {
     resetPreview(articleStore.current.summary.relative_path);
     void ensurePreview(articleStore.current.summary.relative_path);
+    closeArticleEditor();
+  }
+}
+
+function resetArticleEditorViewport() {
+  articleEditorCursor.line = 1;
+  articleEditorCursor.column = 1;
+  articleEditorCodePanelWidth.value = 0.68;
+}
+
+function refreshArticleEditorPreview() {
+  articleEditorPreviewRefreshKey.value += 1;
+}
+
+function toggleArticleEditorFullscreen() {
+  articleEditorFullscreen.value = !articleEditorFullscreen.value;
+}
+
+function getArticleEditorWorkspaceStyle() {
+  const codePercent = `${Math.round(articleEditorCodePanelWidth.value * 100)}%`;
+  return {
+    gridTemplateColumns: `minmax(360px, ${codePercent}) 10px minmax(300px, 1fr)`
+  };
+}
+
+function updateArticleEditorCursor(position?: { line: number; column: number }) {
+  articleEditorCursor.line = position?.line ?? 1;
+  articleEditorCursor.column = position?.column ?? 1;
+}
+
+function stopArticleEditorResize() {
+  articleEditorResizeCleanup?.();
+  articleEditorResizeCleanup = null;
+}
+
+function startArticleEditorResize(event: MouseEvent) {
+  const workspace = articleEditorWorkspace.value;
+  if (!workspace || event.button !== 0) return;
+
+  const bounds = workspace.getBoundingClientRect();
+  const minCodeWidth = 360;
+  const minPreviewWidth = 300;
+
+  const onPointerMove = (moveEvent: MouseEvent) => {
+    const nextCodeWidth = Math.min(
+      Math.max(moveEvent.clientX - bounds.left, minCodeWidth),
+      bounds.width - minPreviewWidth - 10
+    );
+    articleEditorCodePanelWidth.value = nextCodeWidth / bounds.width;
+  };
+
+  const onPointerUp = () => {
+    stopArticleEditorResize();
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  };
+
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+
+  window.addEventListener("mousemove", onPointerMove);
+  window.addEventListener("mouseup", onPointerUp, { once: true });
+
+  articleEditorResizeCleanup = () => {
+    window.removeEventListener("mousemove", onPointerMove);
+    window.removeEventListener("mouseup", onPointerUp);
+  };
+}
+
+async function onArticleEditorWindowKeydown(event: KeyboardEvent) {
+  if (!articleEditorOpen.value) return;
+  if (event.defaultPrevented) return;
+
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    if (!articleEditorIsReadonly.value) {
+      await saveArticleEditor();
+    }
+    return;
+  }
+
+  if (event.key === "F11") {
+    event.preventDefault();
+    toggleArticleEditorFullscreen();
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
     closeArticleEditor();
   }
 }
@@ -247,6 +427,7 @@ async function performDeleteArticle(relativePath: string) {
       articleStore.current = null;
       articleEditorOpen.value = false;
       articleEditorDraft.value = "";
+      articleEditorSelectedSourceKey.value = "original";
     }
 
     resetPreview(relativePath);
@@ -306,15 +487,39 @@ watch(
 watch(
   () => articleEditorOpen.value,
   (open) => {
-    if (!open) return;
-    articleStore.lastMessage = "";
-    articleStore.error = "";
+    if (open) {
+      articleStore.lastMessage = "";
+      articleStore.error = "";
+      window.addEventListener("keydown", onArticleEditorWindowKeydown);
+      nextTick(() => {
+        articleMonacoEditor.value?.focus();
+        updateArticleEditorCursor();
+      });
+      return;
+    }
+
+    stopArticleEditorResize();
+    articleEditorFullscreen.value = false;
+    window.removeEventListener("keydown", onArticleEditorWindowKeydown);
   }
 );
+
+watch(articleEditorSelectedSourceKey, () => {
+  refreshArticleEditorPreview();
+  nextTick(() => {
+    articleMonacoEditor.value?.focus();
+    updateArticleEditorCursor();
+  });
+});
 
 if (!articleStore.articles.length && !articleStore.loading) {
   void articleStore.loadAll();
 }
+
+onBeforeUnmount(() => {
+  stopArticleEditorResize();
+  window.removeEventListener("keydown", onArticleEditorWindowKeydown);
+});
 </script>
 
 <template>
@@ -502,17 +707,63 @@ if (!articleStore.articles.length && !articleStore.loading) {
       </main>
     </div>
 
-    <div v-if="articleEditorOpen && articleStore.current" class="config-modal-backdrop" @click.self="closeArticleEditor">
-      <div class="config-modal aiw-article-editor-modal">
+    <div
+      v-if="articleEditorOpen && articleStore.current"
+      class="config-modal-backdrop aiw-article-editor-backdrop"
+      :class="{ 'aiw-article-editor-backdrop--fullscreen': articleEditorFullscreen }"
+      @click.self="closeArticleEditor"
+    >
+      <div class="config-modal aiw-article-editor-modal" :class="{ 'aiw-article-editor-modal--fullscreen': articleEditorFullscreen }">
         <div class="aiw-article-editor-header">
-          <div>
+          <div class="aiw-article-editor-title-group">
             <p class="eyebrow">{{ t("articles.editorEyebrow") }}</p>
             <h3 class="panel-title">{{ articleStore.current.summary.title || articleStore.current.summary.name }}</h3>
+            <p class="aiw-article-editor-subtitle">{{ articleStore.current.summary.relative_path }}</p>
           </div>
 
-          <div class="btn-row">
-            <button class="btn btn-primary" type="button" @click="saveArticleEditor">
-              {{ articleStore.saving ? t("common.saving") : t("common.save") }}
+          <div class="aiw-article-editor-actions">
+            <select
+              v-model="articleEditorSelectedSourceKey"
+              class="text-input aiw-article-editor-source-select"
+              :aria-label="t('articles.sourceLabel')"
+            >
+              <option v-for="option in articleEditorSourceOptions" :key="option.key" :value="option.key">
+                {{ option.label }}
+              </option>
+            </select>
+            <button
+              class="template-icon-btn aiw-article-editor-toolbar-btn"
+              type="button"
+              :title="t('templates.refreshPreview')"
+              @click="refreshArticleEditorPreview"
+            >
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                <path d="M21 3v6h-6" />
+              </svg>
+            </button>
+            <button
+              class="template-icon-btn aiw-article-editor-toolbar-btn"
+              type="button"
+              :title="articleEditorFullscreen ? t('templates.exitFullscreen') : t('templates.fullscreen')"
+              @click="toggleArticleEditorFullscreen"
+            >
+              <svg v-if="!articleEditorFullscreen" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+                <path d="M16 3h3a2 2 0 0 1 2 2v3" />
+                <path d="M8 21H5a2 2 0 0 1-2-2v-3" />
+                <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+              </svg>
+              <svg v-else viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M9 3H5a2 2 0 0 0-2 2v4" />
+                <path d="M15 3h4a2 2 0 0 1 2 2v4" />
+                <path d="M3 15v4a2 2 0 0 0 2 2h4" />
+                <path d="M21 15v4a2 2 0 0 1-2 2h-4" />
+                <path d="M8 8 3 3" />
+                <path d="m16 8 5-5" />
+                <path d="m8 16-5 5" />
+                <path d="m16 16 5 5" />
+              </svg>
             </button>
             <button class="btn btn-danger" type="button" @click="deleteArticle(articleStore.current.summary.relative_path)">
               {{ t("common.delete") }}
@@ -520,60 +771,78 @@ if (!articleStore.articles.length && !articleStore.loading) {
             <button class="btn btn-secondary" type="button" @click="closeArticleEditor">
               {{ t("common.close") }}
             </button>
+            <button
+              class="btn btn-primary"
+              type="button"
+              :disabled="articleEditorIsReadonly || articleStore.saving"
+              :title="articleEditorIsReadonly ? t('articles.variantReadonlyHint') : undefined"
+              @click="saveArticleEditor"
+            >
+              {{ articleStore.saving ? t("common.saving") : t("common.save") }}
+            </button>
           </div>
         </div>
 
         <div class="aiw-article-editor-meta">
           <span>{{ t("common.path") }}: {{ articleStore.current.summary.relative_path }}</span>
-          <span>{{ t("common.format") }}: {{ articleStore.current.summary.format }}</span>
+          <span>{{ t("articles.sourceLabel") }}: {{ articleEditorActiveSourceLabel }}</span>
+          <span>{{ t("common.format") }}: {{ articleEditorActiveSource?.format || articleStore.current.summary.format }}</span>
           <span>{{ t("common.status") }}: {{ statusText(articleStore.current.summary.status) }}</span>
           <span>{{ t("articles.variantCount", { count: articleStore.current.variants.length }) }}</span>
+          <span v-if="articleEditorActiveVariant">{{ articleEditorActiveVariant.summary.platform_type }}</span>
+          <span v-if="articleEditorIsReadonly" class="aiw-article-editor-readonly">
+            {{ t("articles.variantReadonlyHint") }}
+          </span>
         </div>
 
-        <div class="aiw-article-editor-body">
-          <textarea v-model="articleEditorDraft" class="aiw-article-editor-textarea" spellcheck="false"></textarea>
-          <iframe class="aiw-article-editor-preview" :srcdoc="articleEditorPreviewDocument" :title="t('articles.previewTitle')"></iframe>
-        </div>
-
-        <section class="aiw-article-variants">
-          <div class="aiw-article-variants__header">
-            <h4>{{ t("articles.variantsTitle") }}</h4>
-            <span>{{ t("articles.variantCount", { count: articleStore.current.variants.length }) }}</span>
+        <div class="aiw-article-editor-panels-header">
+          <div class="aiw-article-editor-panels-side">
+            <span>{{ articleEditorActiveSourceLabel }}</span>
+            <span class="aiw-article-editor-status">{{ t("templates.editorCursor", articleEditorCursor) }}</span>
           </div>
-
-          <div v-if="articleStore.current.variants.length" class="aiw-article-variant-list">
-            <article
-              v-for="variant in articleStore.current.variants"
-              :key="`${variant.summary.target_id}-${variant.summary.format}`"
-              class="aiw-article-variant-card"
+          <div class="aiw-article-editor-panels-divider"></div>
+          <div class="aiw-article-editor-panels-side aiw-article-editor-panels-side--preview">
+            <span>{{ t("templates.editorLivePreview") }}</span>
+            <button
+              class="template-icon-btn aiw-article-editor-toolbar-btn"
+              type="button"
+              :title="t('templates.refreshPreview')"
+              @click="refreshArticleEditorPreview"
             >
-              <div class="aiw-article-variant-card__header">
-                <div>
-                  <strong>{{ variant.summary.target_name }}</strong>
-                  <p>{{ variant.summary.platform_type }}</p>
-                </div>
-                <div class="aiw-card-meta">
-                  <span class="aiw-format-badge">{{ variant.summary.format }}</span>
-                  <span>{{ formatBytes(variant.summary.size_bytes) }}</span>
-                  <span>{{ formatRelativeTime(variant.summary.updated_at) }}</span>
-                </div>
-              </div>
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                <path d="M21 3v6h-6" />
+              </svg>
+            </button>
+          </div>
+        </div>
 
-              <div class="aiw-article-variant-card__body">
-                <textarea :value="variant.content" class="aiw-article-variant-textarea" readonly spellcheck="false"></textarea>
-                <iframe
-                  class="aiw-article-variant-preview"
-                  :srcdoc="buildVariantPreviewDocument(variant)"
-                  :title="`${variant.summary.target_name} ${t('articles.previewTitle')}`"
-                ></iframe>
-              </div>
-            </article>
+        <div ref="articleEditorWorkspace" class="aiw-article-editor-workspace" :style="getArticleEditorWorkspaceStyle()">
+          <div class="aiw-article-editor-code-panel">
+            <TemplateMonacoEditor
+              ref="articleMonacoEditor"
+              v-model="articleEditorContent"
+              :language="articleEditorLanguage"
+              :aria-label="articleEditorActiveSourceLabel"
+              :readonly="articleEditorIsReadonly"
+              autofocus
+              @cursor-change="updateArticleEditorCursor"
+              @save-shortcut="saveArticleEditor"
+            />
           </div>
 
-          <div v-else class="aiw-empty-state aiw-empty-state--compact">
-            {{ t("articles.noVariants") }}
+          <div class="aiw-article-editor-resize-divider" @mousedown="startArticleEditorResize"></div>
+
+          <div class="aiw-article-editor-preview-panel">
+            <iframe
+              :key="articleEditorPreviewRefreshKey"
+              class="aiw-article-editor-preview-frame"
+              sandbox="allow-same-origin allow-scripts"
+              :srcdoc="articleEditorPreviewDocument"
+              :title="t('articles.previewTitle')"
+            ></iframe>
           </div>
-        </section>
+        </div>
       </div>
     </div>
 
@@ -1020,18 +1289,72 @@ if (!articleStore.articles.length && !articleStore.loading) {
   padding: 20px;
 }
 
+.aiw-article-editor-backdrop--fullscreen {
+  padding: 0;
+}
+
 .aiw-article-editor-modal {
-  width: min(1120px, 96vw);
+  width: min(1280px, 96vw);
+  max-height: min(92vh, 1000px);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
+  overflow: hidden;
+}
+
+.aiw-article-editor-modal--fullscreen {
+  width: 100vw;
+  max-width: none;
+  height: 100vh;
+  max-height: none;
+  border-radius: 0;
 }
 
 .aiw-article-editor-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
+  gap: 18px;
+}
+
+.aiw-article-editor-title-group {
+  min-width: 0;
+}
+
+.aiw-article-editor-subtitle {
+  margin: 6px 0 0;
+  color: var(--aiw-ink-soft);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.aiw-article-editor-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.aiw-article-editor-source-select {
+  min-width: 260px;
+}
+
+.aiw-article-editor-toolbar-btn {
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--aiw-border);
+  border-radius: 12px;
+  background: #ffffff;
+  color: var(--aiw-ink-soft);
+}
+
+.aiw-article-editor-toolbar-btn:hover {
+  border-color: rgba(49, 101, 235, 0.32);
+  color: var(--aiw-primary);
 }
 
 .aiw-article-editor-meta {
@@ -1042,105 +1365,108 @@ if (!articleStore.articles.length && !articleStore.loading) {
   color: var(--aiw-ink-soft);
 }
 
-.aiw-article-editor-body {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
-  gap: 16px;
-  min-height: 62vh;
+.aiw-article-editor-readonly {
+  color: #b45309;
+  font-weight: 600;
 }
 
-.aiw-article-variants {
+.aiw-article-editor-panels-header {
   display: grid;
-  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) 10px minmax(0, 1fr);
+  align-items: center;
+  min-height: 48px;
+  border: 1px solid var(--aiw-border);
+  border-radius: 14px;
+  background: #f8fbff;
+  color: var(--aiw-ink-soft);
 }
 
-.aiw-article-variants__header {
+.aiw-article-editor-panels-side {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
+  padding: 0 14px;
 }
 
-.aiw-article-variants__header h4 {
-  margin: 0;
-  font-size: 15px;
+.aiw-article-editor-panels-side > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--aiw-ink);
+  font-weight: 600;
 }
 
-.aiw-article-variant-list {
-  display: grid;
-  gap: 14px;
-}
-
-.aiw-article-variant-card {
-  display: grid;
-  gap: 12px;
-  padding: 14px;
-  border: 1px solid var(--aiw-border);
-  border-radius: 12px;
-  background: #fbfdff;
-}
-
-.aiw-article-variant-card__header {
-  display: flex;
+.aiw-article-editor-panels-side--preview {
   justify-content: space-between;
-  gap: 16px;
-  align-items: flex-start;
 }
 
-.aiw-article-variant-card__header p {
-  margin: 4px 0 0;
+.aiw-article-editor-status {
+  flex-shrink: 0;
+  font-size: 12px;
   color: var(--aiw-ink-soft);
-  text-transform: capitalize;
 }
 
-.aiw-article-variant-card__body {
+.aiw-article-editor-panels-divider {
+  position: relative;
+  height: 100%;
+}
+
+.aiw-article-editor-panels-divider::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 10px;
+  bottom: 10px;
+  width: 2px;
+  border-radius: 999px;
+  background: var(--aiw-border);
+}
+
+.aiw-article-editor-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
-  gap: 14px;
-}
-
-.aiw-article-variant-textarea,
-.aiw-article-variant-preview {
-  width: 100%;
-  min-height: 260px;
+  min-height: min(70vh, 720px);
   border: 1px solid var(--aiw-border);
-  border-radius: 12px;
+  border-radius: 16px;
+  overflow: hidden;
   background: #ffffff;
 }
 
-.aiw-article-variant-textarea {
-  padding: 14px;
-  resize: none;
-  color: var(--aiw-ink);
-  font: inherit;
-  line-height: 1.6;
+.aiw-article-editor-code-panel,
+.aiw-article-editor-preview-panel {
+  min-width: 0;
+  min-height: 0;
 }
 
-.aiw-article-editor-textarea {
+.aiw-article-editor-code-panel {
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.aiw-article-editor-resize-divider {
+  width: 10px;
+  cursor: col-resize;
+  background:
+    linear-gradient(90deg, transparent 0, transparent 4px, var(--aiw-border) 4px, var(--aiw-border) 6px, transparent 6px, transparent 100%);
+  transition: background 120ms ease;
+}
+
+.aiw-article-editor-resize-divider:hover {
+  background:
+    linear-gradient(90deg, transparent 0, transparent 4px, rgba(49, 101, 235, 0.28) 4px, rgba(49, 101, 235, 0.28) 6px, transparent 6px, transparent 100%);
+}
+
+.aiw-article-editor-preview-panel {
+  background: #eef4ff;
+  min-height: 0;
+}
+
+.aiw-article-editor-preview-frame {
   width: 100%;
-  min-height: 100%;
-  border: 1px solid var(--aiw-border);
-  border-radius: 12px;
-  background: #fbfdff;
-  color: var(--aiw-ink);
-  padding: 16px;
-  resize: none;
-  font: inherit;
-  line-height: 1.65;
-}
-
-.aiw-article-editor-textarea:focus {
-  outline: none;
-  border-color: var(--aiw-primary);
-  box-shadow: 0 0 0 3px rgba(49, 101, 235, 0.12);
-}
-
-.aiw-article-editor-preview {
-  width: 100%;
-  min-height: 100%;
-  border: 1px solid var(--aiw-border);
-  border-radius: 12px;
+  height: 100%;
+  border: 0;
   background: #ffffff;
 }
 
@@ -1153,12 +1479,18 @@ if (!articleStore.articles.length && !articleStore.loading) {
     grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
   }
 
-  .aiw-article-editor-body {
+  .aiw-article-editor-panels-header,
+  .aiw-article-editor-workspace {
     grid-template-columns: 1fr;
   }
 
-  .aiw-article-variant-card__body {
-    grid-template-columns: 1fr;
+  .aiw-article-editor-panels-divider,
+  .aiw-article-editor-resize-divider {
+    display: none;
+  }
+
+  .aiw-article-editor-source-select {
+    min-width: 220px;
   }
 }
 
@@ -1185,6 +1517,19 @@ if (!articleStore.articles.length && !articleStore.loading) {
   .aiw-toolbar-actions,
   .aiw-batch-actions-group {
     flex-wrap: wrap;
+  }
+
+  .aiw-article-editor-header {
+    flex-direction: column;
+  }
+
+  .aiw-article-editor-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .aiw-article-editor-source-select {
+    width: 100%;
   }
 }
 </style>

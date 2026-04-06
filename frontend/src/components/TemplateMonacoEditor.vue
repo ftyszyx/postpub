@@ -15,10 +15,12 @@ const props = withDefaults(
     language: MonacoLanguage;
     ariaLabel?: string;
     autofocus?: boolean;
+    readonly?: boolean;
   }>(),
   {
     ariaLabel: "Code editor",
-    autofocus: false
+    autofocus: false,
+    readonly: false
   }
 );
 
@@ -137,6 +139,8 @@ async function createEditor() {
     value: props.modelValue,
     language: props.language,
     theme: themeName.value,
+    readOnly: props.readonly,
+    domReadOnly: props.readonly,
     automaticLayout: true,
     minimap: { enabled: false },
     scrollBeyondLastLine: false,
@@ -198,6 +202,16 @@ watch(
     const model = editor?.getModel();
     if (!model) return;
     monaco.editor.setModelLanguage(model, language);
+  }
+);
+
+watch(
+  () => props.readonly,
+  (readonly) => {
+    editor?.updateOptions({
+      readOnly: readonly,
+      domReadOnly: readonly
+    });
   }
 );
 

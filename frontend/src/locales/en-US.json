@@ -284,6 +284,10 @@
     "variantCount": "{count} variants",
     "variantsTitle": "Publish variants",
     "noVariants": "No publish variants have been generated for this article yet.",
+    "sourceLabel": "Version",
+    "originalVersion": "Original version",
+    "variantOptionLabel": "{target} ({format})",
+    "variantReadonlyHint": "Variants are read-only. Switch back to the original version to edit and save.",
     "filters": {
       "all": "All articles",
       "published": "Published",

@@ -284,6 +284,10 @@
     "variantCount": "{count} 个变体",
     "variantsTitle": "发布变体",
     "noVariants": "当前文章还没有生成任何发布变体。",
+    "sourceLabel": "版本",
+    "originalVersion": "原始版本",
+    "variantOptionLabel": "{target}（{format}）",
+    "variantReadonlyHint": "变体内容为只读，请切回原始版本后再编辑和保存。",
     "filters": {
       "all": "全部文章",
       "published": "已发布",

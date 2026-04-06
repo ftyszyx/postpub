@@ -240,13 +240,8 @@ impl GenerationManager {
             }
         }
         self.persist_tasks().await;
-        self.push_event(
-            id,
-            "done",
-            "生成完成",
-            GenerationTaskStatus::Succeeded,
-        )
-        .await;
+        self.push_event(id, "done", "生成完成", GenerationTaskStatus::Succeeded)
+            .await;
     }
 
     async fn finish_failure(&self, id: &str, error: String) {
@@ -372,7 +367,6 @@ fn normalize_restored_task(mut task: GenerationTaskSummary) -> GenerationTaskSum
         task.status,
         GenerationTaskStatus::Pending | GenerationTaskStatus::Running
     ) {
-        let message = "generation interrupted because the service restarted".to_string();
         let message = "服务重启导致任务中断".to_string();
         let timestamp = Utc::now();
         task.status = GenerationTaskStatus::Failed;
