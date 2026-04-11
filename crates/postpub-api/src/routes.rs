@@ -8,11 +8,11 @@ use axum::{
 };
 use futures::StreamExt;
 use postpub_types::{
-    ApiResponse, AppPathsInfo, ArticleDesign, ConfigBundle, CreateTemplateCategoryRequest,
-    CreateTemplateRequest, GenerateArticleRequest, HealthStatus, MoveTemplateRequest,
-    RenameTemplateCategoryRequest, RenameTemplateRequest, TemplateCategorySummary,
-    TemplateDocument, TemplateSummary, UiConfig, UpdateArticleContentRequest,
-    UpdateTemplateContentRequest,
+    ApiResponse, AppPathsInfo, ArticleDesign, BrowserEnvironmentStatus, ConfigBundle,
+    CreateTemplateCategoryRequest, CreateTemplateRequest, GenerateArticleRequest, HealthStatus,
+    MoveTemplateRequest, PublishArticleRequest, RenameTemplateCategoryRequest,
+    RenameTemplateRequest, TemplateCategorySummary, TemplateDocument, TemplateSummary, UiConfig,
+    UpdateArticleContentRequest, UpdateTemplateContentRequest,
 };
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -23,10 +23,20 @@ pub struct TemplateListQuery {
     category: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct BrowserStatusQuery {
+    target_id: Option<String>,
+}
+
 pub fn api_router() -> Router<ApiState> {
     Router::new()
         .route("/api/system/health", get(health))
         .route("/api/system/paths", get(paths))
+        .route("/api/system/browser", get(browser_status))
+        .route(
+            "/api/system/browser/profiles/{*target_id}",
+            axum::routing::delete(clear_browser_profile),
+        )
         .route("/api/config", get(get_config).put(save_config))
         .route("/api/config/default", get(get_default_config))
         .route("/api/config/ui", get(get_ui_config).put(save_ui_config))
@@ -70,6 +80,16 @@ pub fn api_router() -> Router<ApiState> {
             "/api/generation/tasks/{task_id}/events",
             get(generation_events),
         )
+        .route(
+            "/api/publish/tasks",
+            get(list_publish_tasks).post(create_publish_task),
+        )
+        .route("/api/publish/tasks/{task_id}", get(get_publish_task))
+        .route(
+            "/api/publish/tasks/{task_id}/retry",
+            post(retry_publish_task),
+        )
+        .route("/api/publish/tasks/{task_id}/events", get(publish_events))
 }
 
 async fn health(State(state): State<ApiState>) -> Json<ApiResponse<HealthStatus>> {
@@ -78,6 +98,32 @@ async fn health(State(state): State<ApiState>) -> Json<ApiResponse<HealthStatus>
 
 async fn paths(State(state): State<ApiState>) -> Json<ApiResponse<AppPathsInfo>> {
     Json(ApiResponse::ok(state.context.paths().as_info()))
+}
+
+async fn browser_status(
+    State(state): State<ApiState>,
+    Query(query): Query<BrowserStatusQuery>,
+) -> Result<Json<ApiResponse<BrowserEnvironmentStatus>>, ApiError> {
+    let status = state
+        .context
+        .browser_manager()
+        .status(query.target_id.as_deref())
+        .await?;
+    Ok(Json(ApiResponse::ok(status)))
+}
+
+async fn clear_browser_profile(
+    State(state): State<ApiState>,
+    Path(target_id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let profile_dir = state.context.browser_manager().clear_profile(&target_id)?;
+    Ok(Json(ApiResponse::with_message(
+        serde_json::json!({
+            "target_id": target_id,
+            "profile_dir": profile_dir.display().to_string()
+        }),
+        "browser profile cleared",
+    )))
 }
 
 async fn get_config(
@@ -384,6 +430,76 @@ async fn generation_events(
     let Some(receiver) = state.generation_manager.subscribe(&task_id).await else {
         return Err(ApiError::not_found(format!(
             "generation task not found: {task_id}"
+        )));
+    };
+
+    let stream = BroadcastStream::new(receiver).filter_map(|item| async move {
+        match item {
+            Ok(event) => {
+                let payload = serde_json::to_string(&event).ok()?;
+                Some(Ok(Event::default().data(payload)))
+            }
+            Err(_) => None,
+        }
+    });
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+async fn create_publish_task(
+    State(state): State<ApiState>,
+    Json(request): Json<PublishArticleRequest>,
+) -> Result<Json<ApiResponse<postpub_types::PublishTaskSummary>>, ApiError> {
+    let summary = state
+        .publish_manager
+        .create_task(state.context.clone(), request)
+        .await;
+    Ok(Json(ApiResponse::with_message(
+        summary,
+        "publish task created",
+    )))
+}
+
+async fn list_publish_tasks(
+    State(state): State<ApiState>,
+) -> Result<Json<ApiResponse<Vec<postpub_types::PublishTaskSummary>>>, ApiError> {
+    let tasks = state.publish_manager.list_tasks().await;
+    Ok(Json(ApiResponse::ok(tasks)))
+}
+
+async fn get_publish_task(
+    State(state): State<ApiState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<ApiResponse<postpub_types::PublishTaskSummary>>, ApiError> {
+    let Some(task) = state.publish_manager.get_task(&task_id).await else {
+        return Err(ApiError::not_found(format!(
+            "publish task not found: {task_id}"
+        )));
+    };
+    Ok(Json(ApiResponse::ok(task)))
+}
+
+async fn retry_publish_task(
+    State(state): State<ApiState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<ApiResponse<postpub_types::PublishTaskSummary>>, ApiError> {
+    let task = state
+        .publish_manager
+        .retry_task(state.context.clone(), &task_id)
+        .await?;
+    Ok(Json(ApiResponse::with_message(
+        task,
+        "publish task restarted",
+    )))
+}
+
+async fn publish_events(
+    State(state): State<ApiState>,
+    Path(task_id): Path<String>,
+) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let Some(receiver) = state.publish_manager.subscribe(&task_id).await else {
+        return Err(ApiError::not_found(format!(
+            "publish task not found: {task_id}"
         )));
     };
 

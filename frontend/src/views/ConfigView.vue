@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
+import { apiDelete, apiGet, encodePathSegments, type ApiResponse } from "../api/client";
 import {
   Button as AButton,
   Empty as AEmpty,
@@ -20,6 +21,7 @@ import { useConfigStore } from "../stores/config";
 import { useNavigationStore, type ConfigPanel } from "../stores/navigation";
 import { useTemplateStore } from "../stores/templates";
 import type {
+  BrowserEnvironmentStatus,
   CustomLlmProvider,
   ImageModelProvider,
   PublishTargetConfig,
@@ -49,6 +51,10 @@ const llmDraft = ref<CustomLlmProvider>(createLlmDraft());
 const publishTargetModalOpen = ref(false);
 const publishTargetEditId = ref<string | null>(null);
 const publishTargetDraft = ref<PublishTargetConfig>(createPublishTargetDraft());
+const publishTargetBrowserStatus = ref<BrowserEnvironmentStatus | null>(null);
+const publishTargetBrowserLoading = ref(false);
+const publishTargetBrowserError = ref("");
+const publishTargetBrowserMessage = ref("");
 
 const publishTargetTemplateOptions = computed(() =>
   templateStore.templates.filter(
@@ -69,6 +75,19 @@ const llmProtocolOptions = computed(() => [
 
 const publishPlatformTypeOptions = computed(() => [
   { value: "wechat", label: t("config.sections.publishPlatformTypeWechat") }
+]);
+
+const wechatCoverStrategyOptions = computed(() => [
+  { value: "article_cover", label: t("config.sections.wechatCoverStrategyArticleCover") },
+  { value: "first_image", label: t("config.sections.wechatCoverStrategyFirstImage") },
+  { value: "custom_path", label: t("config.sections.wechatCoverStrategyCustomPath") },
+  { value: "manual", label: t("config.sections.wechatCoverStrategyManual") }
+]);
+
+const wechatCommentModeOptions = computed(() => [
+  { value: "auto_selected_open", label: t("config.sections.wechatCommentModeAutoSelectedOpen") },
+  { value: "open_all", label: t("config.sections.wechatCommentModeOpenAll") },
+  { value: "closed", label: t("config.sections.wechatCommentModeClosed") }
 ]);
 
 const publishTargetCategoryOptions = computed(() =>
@@ -109,6 +128,7 @@ const publishPlatformColumns = computed(() => [
   { title: t("config.sections.accountName"), key: "account_name", dataIndex: "account_name", ellipsis: true },
   { title: t("config.sections.publishUrl"), key: "publish_url", dataIndex: "publish_url", ellipsis: true },
   { title: t("config.sections.templateRule"), key: "template_rule", width: 220, ellipsis: true },
+  { title: t("config.sections.wechatSettingsSummary"), key: "wechat_settings", width: 280, ellipsis: true },
   { title: t("common.status"), key: "status", width: 120 },
   { title: t("common.actions"), key: "actions", width: 180, fixed: "right" as const }
 ]);
@@ -154,7 +174,19 @@ function createPublishTargetDraft(index = publishTargets.value.length + 1): Publ
     use_template: true,
     use_compress: false,
     auto_publish: false,
-    format_publish: true
+    format_publish: true,
+    wechat: {
+      cover_strategy: "article_cover",
+      cover_path: "",
+      declare_original: false,
+      enable_reward: false,
+      enable_paid: false,
+      comment_mode: "auto_selected_open",
+      collection_id: "",
+      source_url: "",
+      source_label: "",
+      platform_recommendation_enabled: true
+    }
   };
 }
 
@@ -224,6 +256,35 @@ function imageModelTag(provider: ImageModelProvider) {
 
 function publishTargetTemplateRule(target: PublishTargetConfig) {
   return `${target.template_category} / ${target.template_name || "-"}`;
+}
+
+function wechatCoverStrategyLabel(strategy: string) {
+  return wechatCoverStrategyOptions.value.find((option) => option.value === strategy)?.label || strategy;
+}
+
+function wechatCommentModeLabel(mode: string) {
+  return wechatCommentModeOptions.value.find((option) => option.value === mode)?.label || mode;
+}
+
+function publishTargetWechatSummary(target: PublishTargetConfig) {
+  if (target.platform_type !== "wechat") {
+    return "-";
+  }
+
+  const parts = [
+    wechatCoverStrategyLabel(target.wechat.cover_strategy),
+    wechatCommentModeLabel(target.wechat.comment_mode)
+  ];
+
+  if (target.wechat.declare_original) {
+    parts.push(t("config.sections.wechatDeclareOriginalEnabled"));
+  }
+
+  if (!target.wechat.platform_recommendation_enabled) {
+    parts.push(t("config.sections.wechatPlatformRecommendationDisabled"));
+  }
+
+  return parts.join(" / ");
 }
 
 function syncActiveImageProvider(providerId?: string) {
@@ -363,24 +424,40 @@ async function removeCustomProvider(id: string) {
 function openCreatePublishTargetModal() {
   publishTargetEditId.value = null;
   publishTargetDraft.value = createPublishTargetDraft();
+  publishTargetBrowserStatus.value = null;
+  publishTargetBrowserError.value = "";
+  publishTargetBrowserMessage.value = "";
   ensurePublishTargetTemplateSelection();
   publishTargetModalOpen.value = true;
 }
 
 function openEditPublishTargetModal(target: PublishTargetConfig) {
   publishTargetEditId.value = target.id;
-  publishTargetDraft.value = { ...target };
+  publishTargetDraft.value = {
+    ...target,
+    wechat: { ...target.wechat }
+  };
+  publishTargetBrowserError.value = "";
+  publishTargetBrowserMessage.value = "";
   ensurePublishTargetTemplateSelection();
   publishTargetModalOpen.value = true;
+  void loadPublishTargetBrowserStatus(target.id);
 }
 
 function closePublishTargetModal() {
   publishTargetModalOpen.value = false;
   publishTargetEditId.value = null;
+  publishTargetBrowserStatus.value = null;
+  publishTargetBrowserLoading.value = false;
+  publishTargetBrowserError.value = "";
+  publishTargetBrowserMessage.value = "";
 }
 
 async function savePublishTargetDraft() {
-  const draft = { ...publishTargetDraft.value };
+  const draft = {
+    ...publishTargetDraft.value,
+    wechat: { ...publishTargetDraft.value.wechat }
+  };
   if (!draft.name.trim()) {
     draft.name = t("config.sections.publishPlatformFallbackName");
   }
@@ -402,6 +479,51 @@ async function savePublishTargetDraft() {
 async function removePublishTarget(id: string) {
   configStore.bundle.config.publish_targets = publishTargets.value.filter((target) => target.id !== id);
   await persistConfigMutation();
+}
+
+async function loadPublishTargetBrowserStatus(targetId?: string | null) {
+  if (!targetId) {
+    publishTargetBrowserStatus.value = null;
+    publishTargetBrowserLoading.value = false;
+    publishTargetBrowserError.value = "";
+    return;
+  }
+
+  publishTargetBrowserLoading.value = true;
+  publishTargetBrowserError.value = "";
+
+  try {
+    const response = await apiGet<ApiResponse<BrowserEnvironmentStatus>>("/api/system/browser", {
+      target_id: targetId
+    });
+    publishTargetBrowserStatus.value = response.data;
+  } catch (error) {
+    publishTargetBrowserError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    publishTargetBrowserLoading.value = false;
+  }
+}
+
+async function clearPublishTargetBrowserProfile() {
+  if (!publishTargetEditId.value) {
+    return;
+  }
+
+  publishTargetBrowserLoading.value = true;
+  publishTargetBrowserError.value = "";
+  publishTargetBrowserMessage.value = "";
+
+  try {
+    await apiDelete<ApiResponse<{ target_id: string; profile_dir: string }>>(
+      `/api/system/browser/profiles/${encodePathSegments(publishTargetEditId.value)}`
+    );
+    publishTargetBrowserMessage.value = t("config.sections.browserProfileCleared");
+    await loadPublishTargetBrowserStatus(publishTargetEditId.value);
+  } catch (error) {
+    publishTargetBrowserError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    publishTargetBrowserLoading.value = false;
+  }
 }
 
 async function restoreDefaults() {
@@ -650,6 +772,10 @@ watch(
             {{ publishTargetTemplateRule(asPublishTarget(record)) }}
           </template>
 
+          <template v-else-if="column.key === 'wechat_settings'">
+            {{ publishTargetWechatSummary(asPublishTarget(record)) }}
+          </template>
+
           <template v-else-if="column.key === 'status'">
             <ATag :color="enabledTag(asPublishTarget(record).enabled).color">
               {{ enabledTag(asPublishTarget(record).enabled).label }}
@@ -847,6 +973,123 @@ watch(
           <ASwitch v-model:checked="publishTargetDraft.format_publish" />
         </AFormItem>
       </div>
+
+      <template v-if="publishTargetDraft.platform_type === 'wechat'">
+        <div class="config-subsection">
+          <p class="config-subsection__eyebrow">{{ t("config.sections.wechatSettingsEyebrow") }}</p>
+          <h4 class="config-subsection__title">{{ t("config.sections.wechatSettingsTitle") }}</h4>
+          <p class="config-subsection__description">{{ t("config.sections.wechatSettingsDescription") }}</p>
+        </div>
+
+        <div class="config-form-grid">
+          <AFormItem :label="t('config.sections.wechatCoverStrategy')">
+            <ASelect v-model:value="publishTargetDraft.wechat.cover_strategy" :options="wechatCoverStrategyOptions" />
+          </AFormItem>
+
+          <AFormItem :label="t('config.sections.wechatCommentMode')">
+            <ASelect v-model:value="publishTargetDraft.wechat.comment_mode" :options="wechatCommentModeOptions" />
+          </AFormItem>
+
+          <AFormItem class="config-form-grid__full" :label="t('config.sections.wechatCoverPath')">
+            <AInput v-model:value="publishTargetDraft.wechat.cover_path" />
+          </AFormItem>
+
+          <AFormItem :label="t('config.sections.wechatCollectionId')">
+            <AInput v-model:value="publishTargetDraft.wechat.collection_id" />
+          </AFormItem>
+
+          <AFormItem :label="t('config.sections.wechatSourceLabel')">
+            <AInput v-model:value="publishTargetDraft.wechat.source_label" />
+          </AFormItem>
+
+          <AFormItem class="config-form-grid__full" :label="t('config.sections.wechatSourceUrl')">
+            <AInput v-model:value="publishTargetDraft.wechat.source_url" />
+          </AFormItem>
+        </div>
+
+        <div class="config-toggle-grid">
+          <AFormItem :label="t('config.sections.wechatDeclareOriginal')">
+            <ASwitch v-model:checked="publishTargetDraft.wechat.declare_original" />
+          </AFormItem>
+          <AFormItem :label="t('config.sections.wechatEnableReward')">
+            <ASwitch v-model:checked="publishTargetDraft.wechat.enable_reward" />
+          </AFormItem>
+          <AFormItem :label="t('config.sections.wechatEnablePaid')">
+            <ASwitch v-model:checked="publishTargetDraft.wechat.enable_paid" />
+          </AFormItem>
+          <AFormItem :label="t('config.sections.wechatPlatformRecommendationEnabled')">
+            <ASwitch v-model:checked="publishTargetDraft.wechat.platform_recommendation_enabled" />
+          </AFormItem>
+        </div>
+
+        <div class="config-subsection">
+          <p class="config-subsection__eyebrow">{{ t("config.sections.browserEnvironmentEyebrow") }}</p>
+          <h4 class="config-subsection__title">{{ t("config.sections.browserEnvironmentTitle") }}</h4>
+          <p class="config-subsection__description">{{ t("config.sections.browserEnvironmentDescription") }}</p>
+        </div>
+
+        <template v-if="publishTargetEditId">
+          <div v-if="publishTargetBrowserMessage" class="browser-status browser-status--success">
+            {{ publishTargetBrowserMessage }}
+          </div>
+          <div v-if="publishTargetBrowserError" class="browser-status browser-status--error">
+            {{ publishTargetBrowserError }}
+          </div>
+
+          <div class="browser-status-card">
+            <div class="browser-status-grid">
+              <div class="browser-status-item">
+                <span class="browser-status-item__label">{{ t("config.sections.browserRemoteVersion") }}</span>
+                <strong>{{ publishTargetBrowserStatus?.remote_version || "-" }}</strong>
+              </div>
+              <div class="browser-status-item">
+                <span class="browser-status-item__label">{{ t("config.sections.browserLocalVersion") }}</span>
+                <strong>{{ publishTargetBrowserStatus?.local_version || "-" }}</strong>
+              </div>
+              <div class="browser-status-item">
+                <span class="browser-status-item__label">{{ t("config.sections.browserReady") }}</span>
+                <strong>{{ publishTargetBrowserStatus?.browser_ready ? t("config.sections.providerActive") : t("config.sections.providerInactive") }}</strong>
+              </div>
+              <div class="browser-status-item">
+                <span class="browser-status-item__label">{{ t("config.sections.browserProfileEntries") }}</span>
+                <strong>{{ publishTargetBrowserStatus?.profile_entry_count ?? 0 }}</strong>
+              </div>
+            </div>
+
+            <div class="browser-status-paths">
+              <div class="browser-status-path">
+                <span class="browser-status-item__label">{{ t("config.sections.browserExecutablePath") }}</span>
+                <code>{{ publishTargetBrowserStatus?.browser_executable || "-" }}</code>
+              </div>
+              <div class="browser-status-path">
+                <span class="browser-status-item__label">{{ t("config.sections.browserProfilePath") }}</span>
+                <code>{{ publishTargetBrowserStatus?.profile_dir || "-" }}</code>
+              </div>
+              <div class="browser-status-path">
+                <span class="browser-status-item__label">{{ t("config.sections.browserConfigUrl") }}</span>
+                <code>{{ publishTargetBrowserStatus?.config_url || "-" }}</code>
+              </div>
+              <div class="browser-status-path" v-if="publishTargetBrowserStatus?.remote_error">
+                <span class="browser-status-item__label">{{ t("config.sections.browserRemoteError") }}</span>
+                <code>{{ publishTargetBrowserStatus.remote_error }}</code>
+              </div>
+            </div>
+
+            <div class="config-actions-bar">
+              <AButton :loading="publishTargetBrowserLoading" @click="loadPublishTargetBrowserStatus(publishTargetEditId)">
+                {{ t("config.sections.refreshBrowserEnvironment") }}
+              </AButton>
+              <AButton danger :loading="publishTargetBrowserLoading" @click="clearPublishTargetBrowserProfile">
+                {{ t("config.sections.clearBrowserProfile") }}
+              </AButton>
+            </div>
+          </div>
+        </template>
+
+        <div v-else class="browser-status browser-status--muted">
+          {{ t("config.sections.browserEnvironmentSaveFirst") }}
+        </div>
+      </template>
     </AForm>
   </AModal>
 </template>
@@ -880,6 +1123,102 @@ watch(
   width: 100%;
 }
 
+.config-subsection {
+  margin: 24px 0 12px;
+}
+
+.config-subsection__eyebrow {
+  margin: 0 0 6px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.config-subsection__title {
+  margin: 0;
+  color: var(--ink-strong);
+  font-size: 16px;
+}
+
+.config-subsection__description {
+  margin: 6px 0 0;
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+
+.browser-status-card {
+  display: grid;
+  gap: 16px;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: 16px;
+  background: var(--surface-raised);
+}
+
+.browser-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 16px;
+}
+
+.browser-status-item {
+  display: grid;
+  gap: 4px;
+}
+
+.browser-status-item__label {
+  color: var(--ink-muted);
+  font-size: 12px;
+}
+
+.browser-status-paths {
+  display: grid;
+  gap: 10px;
+}
+
+.browser-status-path {
+  display: grid;
+  gap: 4px;
+}
+
+.browser-status-path code {
+  display: block;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--surface-ground);
+  color: var(--ink-strong);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.browser-status {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  font-size: 13px;
+}
+
+.browser-status--success {
+  background: color-mix(in srgb, var(--brand-primary) 10%, white);
+  color: var(--ink-strong);
+}
+
+.browser-status--error {
+  background: color-mix(in srgb, #d9485f 10%, white);
+  color: #8c1d2c;
+}
+
+.browser-status--muted {
+  margin-top: 12px;
+  border: 1px dashed var(--line-soft);
+  color: var(--ink-muted);
+  background: var(--surface-ground);
+}
+
 .config-table :deep(.ant-table-thead > tr > th) {
   white-space: nowrap;
 }
@@ -890,7 +1229,8 @@ watch(
 
 @media (max-width: 960px) {
   .config-form-grid,
-  .config-toggle-grid {
+  .config-toggle-grid,
+  .browser-status-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -9,6 +9,7 @@ import type {
   PageDesignConfig,
   PostpubConfig,
   PublishTargetConfig,
+  WechatPublishTargetConfig,
   UiConfig
 } from "../types/postpub";
 import { translate } from "../utils/i18n";
@@ -80,6 +81,22 @@ const defaultImageApiConfig = (): ImageApiConfig => ({
   picsum: defaultImageApiProvider()
 });
 
+const defaultWechatPublishTargetConfig = (
+  overrides: Partial<WechatPublishTargetConfig> = {}
+): WechatPublishTargetConfig => ({
+  cover_strategy: "article_cover",
+  cover_path: "",
+  declare_original: false,
+  enable_reward: false,
+  enable_paid: false,
+  comment_mode: "auto_selected_open",
+  collection_id: "",
+  source_url: "",
+  source_label: "",
+  platform_recommendation_enabled: true,
+  ...overrides
+});
+
 const defaultPublishTarget = (index = 1, overrides: Partial<PublishTargetConfig> = {}): PublishTargetConfig => ({
   id: `publish-wechat-${index}`,
   name: `微信公众号 ${index}`,
@@ -97,6 +114,7 @@ const defaultPublishTarget = (index = 1, overrides: Partial<PublishTargetConfig>
   use_compress: false,
   auto_publish: false,
   format_publish: true,
+  wechat: defaultWechatPublishTargetConfig(),
   ...overrides
 });
 
@@ -218,7 +236,8 @@ function normalizePublishTarget(target?: Partial<PublishTargetConfig> | null, in
     ...(target || {}),
     id: target?.id || `publish-wechat-${index}`,
     name: target?.name || defaultPublishTarget(index).name,
-    platform_type: target?.platform_type || "wechat"
+    platform_type: target?.platform_type || "wechat",
+    wechat: defaultWechatPublishTargetConfig(target?.wechat || {})
   });
 }
 

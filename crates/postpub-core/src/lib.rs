@@ -1,9 +1,11 @@
 mod aiforge;
 mod articles;
+mod browser;
 mod config;
 mod error;
 mod generation;
 mod paths;
+mod publish;
 mod templates;
 
 use chrono::Utc;
@@ -12,10 +14,14 @@ use reqwest::Client;
 
 pub use aiforge::AiforgeEngine;
 pub use articles::{markdown_to_html, preview_html, ArticleStore};
+pub use browser::BrowserManager;
 pub use config::ConfigStore;
 pub use error::{PostpubError, Result};
 pub use generation::{GenerationProgressReporter, GenerationService};
 pub use paths::AppPaths;
+pub use publish::{
+    BrowserRuntime, PublishProgressReporter, PublishService, Publisher, WechatPublisher,
+};
 pub use templates::TemplateStore;
 
 #[derive(Debug, Clone)]
@@ -91,5 +97,13 @@ impl AppContext {
 
     pub fn generation_service(&self) -> GenerationService {
         GenerationService::new(self.clone())
+    }
+
+    pub fn publish_service(&self) -> PublishService {
+        PublishService::new(self.clone())
+    }
+
+    pub fn browser_manager(&self) -> BrowserManager {
+        BrowserManager::new(self.paths.clone(), self.http_client.clone())
     }
 }

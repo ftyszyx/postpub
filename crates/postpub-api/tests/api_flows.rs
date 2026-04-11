@@ -10,8 +10,9 @@ use axum::{
 use postpub_api::build_router;
 use postpub_core::AppContext;
 use postpub_types::{
-    ApiResponse, ArticleDesign, ConfigBundle, CustomLlmProvider, GenerateArticleRequest,
-    GenerationTaskStatus, GenerationTaskSummary, TemplateDocument,
+    ApiResponse, ArticleDesign, ArticleVariantDocument, ArticleVariantSummary, ConfigBundle,
+    CustomLlmProvider, GenerateArticleRequest, GenerationTaskStatus, GenerationTaskSummary,
+    PublishArticleRequest, PublishTaskStatus, PublishTaskSummary, TemplateDocument,
 };
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -80,6 +81,33 @@ async fn wait_for_task_completion(app: &Router, task_id: &str) -> GenerationTask
     final_task.expect("generation task completed")
 }
 
+async fn wait_for_publish_task_completion(app: &Router, task_id: &str) -> PublishTaskSummary {
+    let mut final_task = None;
+    for _ in 0..40 {
+        let (status, task): (StatusCode, ApiResponse<PublishTaskSummary>) = json_response(
+            app,
+            Request::builder()
+                .uri(format!("/api/publish/tasks/{task_id}"))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        if matches!(
+            task.data.status,
+            PublishTaskStatus::Succeeded | PublishTaskStatus::Failed
+        ) {
+            final_task = Some(task.data);
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    final_task.expect("publish task completed")
+}
+
 #[tokio::test]
 async fn config_endpoints_roundtrip() {
     let (app, _, _temp) = test_app();
@@ -101,6 +129,11 @@ async fn config_endpoints_roundtrip() {
     bundle.data.config.img_api.api_type = "ali".to_string();
     bundle.data.config.img_api.ali.api_key = "ali-key".to_string();
     bundle.data.config.img_api.ali.model = "wanx2.1-t2i-plus".to_string();
+    bundle.data.config.publish_targets[0].wechat.cover_strategy = "custom_path".to_string();
+    bundle.data.config.publish_targets[0].wechat.cover_path = "D:/covers/wechat.png".to_string();
+    bundle.data.config.publish_targets[0]
+        .wechat
+        .declare_original = true;
     bundle.data.ui_config.custom_llm_providers[0].api_key = "llm-key".to_string();
 
     let (status, saved): (StatusCode, ApiResponse<ConfigBundle>) = json_response(
@@ -120,6 +153,15 @@ async fn config_endpoints_roundtrip() {
     assert_eq!(saved.data.config.aiforge_search_min_results, 1);
     assert_eq!(saved.data.config.img_api.api_type, "ali");
     assert_eq!(saved.data.config.img_api.ali.api_key, "ali-key");
+    assert_eq!(
+        saved.data.config.publish_targets[0].wechat.cover_strategy,
+        "custom_path"
+    );
+    assert_eq!(
+        saved.data.config.publish_targets[0].wechat.cover_path,
+        "D:/covers/wechat.png"
+    );
+    assert!(saved.data.config.publish_targets[0].wechat.declare_original);
     assert_eq!(
         saved.data.ui_config.custom_llm_providers[0].api_key,
         bundle.data.ui_config.custom_llm_providers[0].api_key
@@ -575,6 +617,141 @@ async fn generation_task_retry_reuses_existing_task_id() {
         &app,
         Request::builder()
             .uri("/api/generation/tasks")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tasks.data.len(), 1);
+    assert_eq!(tasks.data[0].id, failed.id);
+}
+
+#[tokio::test]
+async fn publish_task_fails_with_clear_wechat_placeholder_error() {
+    let (app, context, _temp) = test_app();
+
+    let article = context
+        .article_store()
+        .save_generated_source_article(
+            "Wechat Publish Demo",
+            "# Wechat Publish Demo\n\nBody",
+            &[ArticleVariantDocument {
+                summary: ArticleVariantSummary {
+                    target_id: "publish-wechat-1".to_string(),
+                    target_name: "微信公众号 1".to_string(),
+                    platform_type: "wechat".to_string(),
+                    format: "HTML".to_string(),
+                    size_bytes: 0,
+                    updated_at: chrono::Utc::now(),
+                },
+                content: "<section><h1>Wechat Publish Demo</h1><p>Body</p></section>".to_string(),
+                preview_html: "<section><h1>Wechat Publish Demo</h1><p>Body</p></section>"
+                    .to_string(),
+            }],
+        )
+        .expect("save article");
+
+    let request = PublishArticleRequest {
+        article_relative_path: article.summary.relative_path.clone(),
+        target_id: "publish-wechat-1".to_string(),
+        mode: "draft".to_string(),
+    };
+
+    let (status, created): (StatusCode, ApiResponse<PublishTaskSummary>) = json_response(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/publish/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&request).expect("serialize publish request"),
+            ))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let finished = wait_for_publish_task_completion(&app, &created.data.id).await;
+    assert_eq!(finished.status, PublishTaskStatus::Failed);
+    assert!(finished
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("wechat publisher is not implemented yet"));
+    assert!(finished.events.iter().any(|event| event.stage == "prepare"));
+    assert!(finished
+        .events
+        .iter()
+        .any(|event| event.stage == "wechat.prepare"));
+}
+
+#[tokio::test]
+async fn publish_task_retry_reuses_existing_task_id() {
+    let (app, context, _temp) = test_app();
+
+    let article = context
+        .article_store()
+        .save_generated_source_article(
+            "Wechat Publish Retry",
+            "# Wechat Publish Retry\n\nBody",
+            &[ArticleVariantDocument {
+                summary: ArticleVariantSummary {
+                    target_id: "publish-wechat-1".to_string(),
+                    target_name: "微信公众号 1".to_string(),
+                    platform_type: "wechat".to_string(),
+                    format: "HTML".to_string(),
+                    size_bytes: 0,
+                    updated_at: chrono::Utc::now(),
+                },
+                content: "<section><h1>Wechat Publish Retry</h1><p>Body</p></section>".to_string(),
+                preview_html: "<section><h1>Wechat Publish Retry</h1><p>Body</p></section>"
+                    .to_string(),
+            }],
+        )
+        .expect("save article");
+
+    let request = PublishArticleRequest {
+        article_relative_path: article.summary.relative_path.clone(),
+        target_id: "publish-wechat-1".to_string(),
+        mode: "draft".to_string(),
+    };
+
+    let (status, created): (StatusCode, ApiResponse<PublishTaskSummary>) = json_response(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/publish/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&request).expect("serialize publish request"),
+            ))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let failed = wait_for_publish_task_completion(&app, &created.data.id).await;
+    assert_eq!(failed.status, PublishTaskStatus::Failed);
+
+    let (status, retried): (StatusCode, ApiResponse<PublishTaskSummary>) = json_response(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/publish/tasks/{}/retry", failed.id))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(retried.data.id, failed.id);
+
+    let failed_again = wait_for_publish_task_completion(&app, &failed.id).await;
+    assert_eq!(failed_again.status, PublishTaskStatus::Failed);
+
+    let (status, tasks): (StatusCode, ApiResponse<Vec<PublishTaskSummary>>) = json_response(
+        &app,
+        Request::builder()
+            .uri("/api/publish/tasks")
             .body(Body::empty())
             .expect("request"),
     )

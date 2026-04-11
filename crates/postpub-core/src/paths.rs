@@ -62,6 +62,18 @@ impl AppPaths {
         self.app_root.join("temp")
     }
 
+    pub fn runtime_dir(&self) -> PathBuf {
+        self.app_root.join("runtime")
+    }
+
+    pub fn browser_dir(&self) -> PathBuf {
+        self.runtime_dir().join("browser")
+    }
+
+    pub fn browser_profiles_dir(&self) -> PathBuf {
+        self.runtime_dir().join("profiles")
+    }
+
     pub fn config_file(&self) -> PathBuf {
         self.config_dir().join("config.yaml")
     }
@@ -82,6 +94,10 @@ impl AppPaths {
         self.articles_dir().join("generation_tasks.json")
     }
 
+    pub fn publish_tasks_file(&self) -> PathBuf {
+        self.articles_dir().join("publish_tasks.json")
+    }
+
     pub fn ensure_directories(&self) -> io::Result<()> {
         for dir in [
             self.app_root.clone(),
@@ -91,6 +107,9 @@ impl AppPaths {
             self.images_dir(),
             self.logs_dir(),
             self.temp_dir(),
+            self.runtime_dir(),
+            self.browser_dir(),
+            self.browser_profiles_dir(),
         ] {
             fs::create_dir_all(dir)?;
         }
@@ -107,11 +126,55 @@ impl AppPaths {
             images_dir: self.images_dir().display().to_string(),
             logs_dir: self.logs_dir().display().to_string(),
             temp_dir: self.temp_dir().display().to_string(),
+            runtime_dir: self.runtime_dir().display().to_string(),
+            browser_dir: self.browser_dir().display().to_string(),
+            browser_profiles_dir: self.browser_profiles_dir().display().to_string(),
             config_file: self.config_file().display().to_string(),
             aiforge_config_file: self.aiforge_config_file().display().to_string(),
             ui_config_file: self.ui_config_file().display().to_string(),
             publish_records_file: self.publish_records_file().display().to_string(),
+            publish_tasks_file: self.publish_tasks_file().display().to_string(),
+            embedded_browser_executable: self
+                .embedded_browser_executable()
+                .map(|path| path.display().to_string()),
         }
+    }
+
+    pub fn embedded_browser_executable(&self) -> Option<PathBuf> {
+        self.browser_executable_candidates()
+            .into_iter()
+            .find(|path| path.is_file())
+            .and_then(|path| path.canonicalize().ok().or(Some(path)))
+    }
+
+    fn browser_executable_candidates(&self) -> Vec<PathBuf> {
+        let browser_dir = self.browser_dir();
+        vec![
+            browser_dir.join("chrome.exe"),
+            browser_dir.join("chromium.exe"),
+            browser_dir.join("chrome"),
+            browser_dir.join("chromium"),
+            browser_dir.join("chrome-win64").join("chrome.exe"),
+            browser_dir.join("chrome-win32").join("chrome.exe"),
+            browser_dir.join("chrome-linux64").join("chrome"),
+            browser_dir.join("chrome-linux").join("chrome"),
+            browser_dir.join("chromium").join("chrome"),
+            browser_dir
+                .join("Google Chrome for Testing.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("Google Chrome for Testing"),
+            browser_dir
+                .join("Google Chrome.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("Google Chrome"),
+            browser_dir
+                .join("Chromium.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("Chromium"),
+        ]
     }
 
     fn workspace_root() -> PathBuf {
@@ -124,6 +187,8 @@ impl AppPaths {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+
+    use tempfile::tempdir;
 
     use super::AppPaths;
 
@@ -156,8 +221,41 @@ mod tests {
             PathBuf::from("D:/example/postpub-data/output/article/generation_tasks.json")
         );
         assert_eq!(
+            paths.publish_tasks_file(),
+            PathBuf::from("D:/example/postpub-data/output/article/publish_tasks.json")
+        );
+        assert_eq!(
             paths.templates_dir(),
             PathBuf::from("D:/example/postpub-data/templates")
         );
+        assert_eq!(
+            paths.runtime_dir(),
+            PathBuf::from("D:/example/postpub-data/runtime")
+        );
+        assert_eq!(
+            paths.browser_dir(),
+            PathBuf::from("D:/example/postpub-data/runtime/browser")
+        );
+        assert_eq!(
+            paths.browser_profiles_dir(),
+            PathBuf::from("D:/example/postpub-data/runtime/profiles")
+        );
+    }
+
+    #[test]
+    fn discovers_embedded_browser_inside_runtime_browser_dir() {
+        let temp = tempdir().expect("temp dir");
+        let paths = AppPaths::from_root(temp.path());
+        std::fs::create_dir_all(paths.browser_dir().join("chrome-win64")).expect("browser dir");
+        std::fs::write(
+            paths.browser_dir().join("chrome-win64").join("chrome.exe"),
+            b"stub",
+        )
+        .expect("browser exe");
+
+        let discovered = paths
+            .embedded_browser_executable()
+            .expect("embedded browser path");
+        assert!(discovered.ends_with("chrome.exe"));
     }
 }

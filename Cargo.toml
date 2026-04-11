@@ -16,6 +16,7 @@ license = "UNLICENSED"
 [workspace.dependencies]
 anyhow = "1"
 async-stream = "0.3"
+async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
@@ -40,3 +41,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http = { version = "0.6", features = ["fs"] }
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
+zip = "2"

@@ -13,10 +13,31 @@ export interface AppPathsInfo {
   images_dir: string;
   logs_dir: string;
   temp_dir: string;
+  runtime_dir: string;
+  browser_dir: string;
+  browser_profiles_dir: string;
   config_file: string;
   aiforge_config_file: string;
   ui_config_file: string;
   publish_records_file: string;
+  publish_tasks_file: string;
+  embedded_browser_executable?: string | null;
+}
+
+export interface BrowserEnvironmentStatus {
+  config_url: string;
+  remote_version?: string | null;
+  remote_asset_url?: string | null;
+  remote_error?: string | null;
+  browser_dir: string;
+  browser_profiles_dir: string;
+  manifest_path: string;
+  local_version?: string | null;
+  browser_executable?: string | null;
+  browser_ready: boolean;
+  profile_dir?: string | null;
+  profile_exists: boolean;
+  profile_entry_count: number;
 }
 
 export interface PlatformSource {
@@ -82,6 +103,20 @@ export interface PublishTargetConfig {
   use_compress: boolean;
   auto_publish: boolean;
   format_publish: boolean;
+  wechat: WechatPublishTargetConfig;
+}
+
+export interface WechatPublishTargetConfig {
+  cover_strategy: string;
+  cover_path: string;
+  declare_original: boolean;
+  enable_reward: boolean;
+  enable_paid: boolean;
+  comment_mode: string;
+  collection_id: string;
+  source_url: string;
+  source_label: string;
+  platform_recommendation_enabled: boolean;
 }
 
 export interface SearchProviderConfig {
@@ -253,5 +288,44 @@ export interface GenerationTaskSummary {
   updated_at: string;
   events: GenerationEvent[];
   output?: GenerationOutput;
+  error?: string;
+}
+
+export interface PublishArticleRequest {
+  article_relative_path: string;
+  target_id: string;
+  mode: string;
+}
+
+export interface PublishOutput {
+  article_relative_path: string;
+  article_title: string;
+  target_id: string;
+  target_name: string;
+  platform_type: string;
+  mode: string;
+  format: string;
+  remote_id?: string;
+  remote_url?: string;
+}
+
+export type PublishTaskStatus = "Pending" | "Running" | "Succeeded" | "Failed";
+
+export interface PublishEvent {
+  task_id: string;
+  timestamp: string;
+  stage: string;
+  message: string;
+  status: PublishTaskStatus;
+}
+
+export interface PublishTaskSummary {
+  id: string;
+  request: PublishArticleRequest;
+  status: PublishTaskStatus;
+  created_at: string;
+  updated_at: string;
+  events: PublishEvent[];
+  output?: PublishOutput;
   error?: string;
 }

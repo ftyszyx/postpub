@@ -59,10 +59,39 @@ pub struct AppPathsInfo {
     pub images_dir: String,
     pub logs_dir: String,
     pub temp_dir: String,
+    pub runtime_dir: String,
+    pub browser_dir: String,
+    pub browser_profiles_dir: String,
     pub config_file: String,
     pub aiforge_config_file: String,
     pub ui_config_file: String,
     pub publish_records_file: String,
+    pub publish_tasks_file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded_browser_executable: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserEnvironmentStatus {
+    pub config_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_asset_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_error: Option<String>,
+    pub browser_dir: String,
+    pub browser_profiles_dir: String,
+    pub manifest_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_executable: Option<String>,
+    pub browser_ready: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_dir: Option<String>,
+    pub profile_exists: bool,
+    pub profile_entry_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,6 +269,8 @@ pub struct PublishTargetConfig {
     pub auto_publish: bool,
     #[serde(default)]
     pub format_publish: bool,
+    #[serde(default)]
+    pub wechat: WechatPublishTargetConfig,
 }
 
 impl Default for PublishTargetConfig {
@@ -261,8 +292,62 @@ impl Default for PublishTargetConfig {
             use_compress: false,
             auto_publish: false,
             format_publish: true,
+            wechat: WechatPublishTargetConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WechatPublishTargetConfig {
+    #[serde(default = "default_wechat_cover_strategy")]
+    pub cover_strategy: String,
+    #[serde(default)]
+    pub cover_path: String,
+    #[serde(default)]
+    pub declare_original: bool,
+    #[serde(default)]
+    pub enable_reward: bool,
+    #[serde(default)]
+    pub enable_paid: bool,
+    #[serde(default = "default_wechat_comment_mode")]
+    pub comment_mode: String,
+    #[serde(default)]
+    pub collection_id: String,
+    #[serde(default)]
+    pub source_url: String,
+    #[serde(default)]
+    pub source_label: String,
+    #[serde(default = "default_wechat_platform_recommendation_enabled")]
+    pub platform_recommendation_enabled: bool,
+}
+
+impl Default for WechatPublishTargetConfig {
+    fn default() -> Self {
+        Self {
+            cover_strategy: default_wechat_cover_strategy(),
+            cover_path: String::new(),
+            declare_original: false,
+            enable_reward: false,
+            enable_paid: false,
+            comment_mode: default_wechat_comment_mode(),
+            collection_id: String::new(),
+            source_url: String::new(),
+            source_label: String::new(),
+            platform_recommendation_enabled: default_wechat_platform_recommendation_enabled(),
+        }
+    }
+}
+
+fn default_wechat_cover_strategy() -> String {
+    "article_cover".to_string()
+}
+
+fn default_wechat_comment_mode() -> String {
+    "auto_selected_open".to_string()
+}
+
+fn default_wechat_platform_recommendation_enabled() -> bool {
+    true
 }
 
 fn default_publish_targets() -> Vec<PublishTargetConfig> {
@@ -620,6 +705,65 @@ pub struct GenerationTaskSummary {
     pub events: Vec<GenerationEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<GenerationOutput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishArticleRequest {
+    pub article_relative_path: String,
+    pub target_id: String,
+    #[serde(default = "default_publish_mode")]
+    pub mode: String,
+}
+
+fn default_publish_mode() -> String {
+    "draft".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishOutput {
+    pub article_relative_path: String,
+    pub article_title: String,
+    pub target_id: String,
+    pub target_name: String,
+    pub platform_type: String,
+    pub mode: String,
+    pub format: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PublishTaskStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishEvent {
+    pub task_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub stage: String,
+    pub message: String,
+    pub status: PublishTaskStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishTaskSummary {
+    pub id: String,
+    pub request: PublishArticleRequest,
+    pub status: PublishTaskStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub events: Vec<PublishEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<PublishOutput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
