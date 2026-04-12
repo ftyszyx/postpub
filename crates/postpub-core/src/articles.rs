@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     error::{PostpubError, Result},
     paths::AppPaths,
+    text::repair_mojibake,
 };
 
 #[derive(Debug, Clone)]
@@ -236,8 +237,21 @@ impl ArticleStore {
             return Ok(Vec::new());
         }
 
-        let stored: ArticleVariantsFile =
-            serde_json::from_str(&fs::read_to_string(variants_path)?)?;
+        let mut stored: ArticleVariantsFile =
+            serde_json::from_str(&fs::read_to_string(&variants_path)?)?;
+        let mut changed = false;
+
+        for variant in &mut stored.variants {
+            if let Some(repaired) = repair_mojibake(&variant.target_name) {
+                variant.target_name = repaired;
+                changed = true;
+            }
+        }
+
+        if changed {
+            fs::write(&variants_path, serde_json::to_string_pretty(&stored)?)?;
+        }
+
         Ok(stored
             .variants
             .into_iter()
@@ -419,11 +433,13 @@ struct StoredArticleVariant {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use chrono::Utc;
     use postpub_types::{ArticleVariantDocument, ArticleVariantSummary};
     use tempfile::tempdir;
 
-    use super::{markdown_to_html, ArticleStore};
+    use super::{markdown_to_html, ArticleStore, ArticleVariantsFile, StoredArticleVariant};
     use crate::paths::AppPaths;
 
     #[test]
@@ -520,5 +536,52 @@ mod tests {
             .expect("update article");
         assert!(updated.variants.is_empty());
         assert_eq!(updated.summary.variant_count, 0);
+    }
+
+    #[test]
+    fn repairs_mojibake_variant_target_names_on_load() {
+        let temp = tempdir().expect("temp dir");
+        let paths = AppPaths::from_root(temp.path().to_path_buf());
+        let store = ArticleStore::new(paths.clone());
+        let now = Utc::now();
+
+        store
+            .save_generated_article("Variant|Repair", "md", "# Title\n\nBody")
+            .expect("save article");
+
+        let variants_path = paths
+            .articles_dir()
+            .join("Variant_Repair.variants.json");
+        fs::write(
+            &variants_path,
+            serde_json::to_string_pretty(&ArticleVariantsFile {
+                variants: vec![StoredArticleVariant {
+                    target_id: "publish-wechat-1".to_string(),
+                    target_name: latin1_mojibake("微信公众号 1"),
+                    platform_type: "wechat".to_string(),
+                    format: "html".to_string(),
+                    updated_at: now,
+                    content: "<section><h1>Title</h1><p>Body</p></section>".to_string(),
+                }],
+            })
+            .expect("serialize variants"),
+        )
+        .expect("write variants");
+
+        let article = store
+            .get_article("Variant_Repair.md")
+            .expect("load repaired article");
+        assert_eq!(article.variants[0].summary.target_name, "微信公众号 1");
+
+        let persisted = fs::read_to_string(variants_path).expect("read variants");
+        assert!(persisted.contains("微信公众号 1"));
+    }
+
+    fn latin1_mojibake(value: &str) -> String {
+        value
+            .as_bytes()
+            .iter()
+            .map(|byte| char::from(*byte))
+            .collect()
     }
 }

@@ -1,19 +1,34 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 import { marked } from "marked";
 import { useI18n } from "vue-i18n";
-import { apiDelete, apiGet, encodePathSegments, type ApiResponse } from "../api/client";
+import { apiDelete, apiGet, apiPost, encodePathSegments, type ApiResponse } from "../api/client";
 import TemplateMonacoEditor from "../components/TemplateMonacoEditor.vue";
 import { useArticleStore } from "../stores/articles";
 import { useConfigStore } from "../stores/config";
-import type { ArticleDocument, ArticleSummary, ArticleVariantDocument } from "../types/postpub";
+import type {
+  ArticleDocument,
+  ArticleSummary,
+  ArticleVariantDocument,
+  ArticleVariantSummary,
+  PublishArticleRequest,
+  PublishTaskSummary
+} from "../types/postpub";
 import { decoratePreviewDocument } from "../utils/preview";
 
 type ArticleLayout = "grid" | "list";
 type ArticleStatusFilter = "all" | "published" | "failed" | "unpublished";
+type ArticlePublishOption = {
+  targetId: string;
+  targetName: string;
+  platformType: string;
+  format: string;
+};
 
 const articleStore = useArticleStore();
 const configStore = useConfigStore();
+const router = useRouter();
 const { t, locale } = useI18n();
 
 const layout = ref<ArticleLayout>("grid");
@@ -30,9 +45,17 @@ const articleEditorPreviewRefreshKey = ref(0);
 const articleEditorFullscreen = ref(false);
 const articleEditorCursor = reactive({ line: 1, column: 1 });
 const articleEditorCodePanelWidth = ref(0.68);
+const publishTargetDialogOpen = ref(false);
+const publishTargetDialogArticlePath = ref("");
+const publishTargetDialogArticleTitle = ref("");
+const publishTargetDialogOptions = ref<ArticlePublishOption[]>([]);
+const publishingArticlePath = ref("");
+const publishSubmitting = ref(false);
+const batchPublishing = ref(false);
 
 const previewHtmlMap = reactive<Record<string, string>>({});
 const previewStateMap = reactive<Record<string, "idle" | "loading" | "ready" | "error">>({});
+const articleVariantSummaryMap = reactive<Record<string, ArticleVariantSummary[]>>({});
 
 let articleEditorResizeCleanup: (() => void) | null = null;
 
@@ -148,6 +171,34 @@ const articleEditorPreviewDocument = computed(() => {
   return decoratePreviewDocument(source, configStore.designSurface, title);
 });
 
+const enabledPublishTargets = computed(() =>
+  configStore.bundle.config.publish_targets.filter((target) => target.enabled)
+);
+
+const batchPublishButtonDisabled = computed(
+  () =>
+    !selectedPaths.value.length ||
+    batchPublishing.value ||
+    publishSubmitting.value ||
+    !enabledPublishTargets.value.length
+);
+
+const batchPublishButtonTitle = computed(() => {
+  if (publishSubmitting.value || batchPublishing.value) {
+    return t("articles.publishSubmitting");
+  }
+
+  if (!selectedPaths.value.length) {
+    return t("articles.batchPublishSelectFirst");
+  }
+
+  if (!enabledPublishTargets.value.length) {
+    return t("articles.noEnabledPublishTargets");
+  }
+
+  return t("articles.batchPublish");
+});
+
 function buildVariantPreviewDocument(variant: ArticleVariantDocument) {
   const articleTitle =
     articleStore.current?.summary.title || articleStore.current?.summary.name || t("articles.previewTitle");
@@ -157,6 +208,14 @@ function buildVariantPreviewDocument(variant: ArticleVariantDocument) {
     configStore.designSurface,
     `${articleTitle} - ${variant.summary.target_name}`
   );
+}
+
+function articleDisplayTitle(article: Pick<ArticleSummary, "title" | "name" | "relative_path">) {
+  return article.title || article.name || article.relative_path;
+}
+
+function cacheArticleMetadata(article: ArticleDocument) {
+  articleVariantSummaryMap[article.summary.relative_path] = article.variants.map((variant) => variant.summary);
 }
 
 function buildVariantSourceKey(variant: ArticleVariantDocument) {
@@ -284,8 +343,7 @@ async function ensurePreview(relativePath: string) {
   previewStateMap[relativePath] = "loading";
 
   try {
-    const response = await apiGet<ApiResponse<ArticleDocument>>(`/api/articles/${encodePathSegments(relativePath)}`);
-    const article = response.data;
+    const article = await fetchArticleDocument(relativePath);
     previewHtmlMap[relativePath] = decoratePreviewDocument(
       article.preview_html || buildArticlePreviewSource(article.content, article.summary.format),
       configStore.designSurface,
@@ -302,9 +360,21 @@ function resetPreview(relativePath: string) {
   delete previewStateMap[relativePath];
 }
 
+async function fetchArticleDocument(relativePath: string) {
+  if (articleStore.current?.summary.relative_path === relativePath) {
+    cacheArticleMetadata(articleStore.current);
+    return articleStore.current;
+  }
+
+  const response = await apiGet<ApiResponse<ArticleDocument>>(`/api/articles/${encodePathSegments(relativePath)}`);
+  cacheArticleMetadata(response.data);
+  return response.data;
+}
+
 async function openArticleEditor(relativePath: string) {
   await articleStore.open(relativePath);
   if (!articleStore.current) return;
+  cacheArticleMetadata(articleStore.current);
   articleEditorDraft.value = articleStore.current.content;
   articleEditorSelectedSourceKey.value = "original";
   articleEditorPreviewRefreshKey.value += 1;
@@ -340,6 +410,245 @@ function refreshArticleEditorPreview() {
 
 function toggleArticleEditorFullscreen() {
   articleEditorFullscreen.value = !articleEditorFullscreen.value;
+}
+
+function clearArticleFeedback() {
+  articleStore.error = "";
+  articleStore.lastMessage = "";
+}
+
+function publishPlatformLabel(platformType: string) {
+  if (platformType === "wechat") {
+    return t("config.sections.publishPlatformTypeWechat");
+  }
+
+  return platformType;
+}
+
+function resolvePublishOptions(relativePath: string): ArticlePublishOption[] {
+  const targetMap = new Map(enabledPublishTargets.value.map((target) => [target.id, target]));
+  const options = new Map<string, ArticlePublishOption>();
+
+  for (const variant of articleVariantSummaryMap[relativePath] ?? []) {
+    const target = targetMap.get(variant.target_id);
+    if (!target) {
+      continue;
+    }
+
+    if (!options.has(target.id)) {
+      options.set(target.id, {
+        targetId: target.id,
+        targetName: target.name || variant.target_name || target.account_name || target.id,
+        platformType: target.platform_type || variant.platform_type,
+        format: variant.format
+      });
+    }
+  }
+
+  return [...options.values()];
+}
+
+function canPublishArticle(article: ArticleSummary) {
+  if (!enabledPublishTargets.value.length || article.variant_count <= 0) {
+    return false;
+  }
+
+  const knownOptions = resolvePublishOptions(article.relative_path);
+  if (knownOptions.length) {
+    return true;
+  }
+
+  return !(article.relative_path in articleVariantSummaryMap);
+}
+
+function articlePublishButtonTitle(article: ArticleSummary) {
+  if (publishingArticlePath.value === article.relative_path || publishSubmitting.value || batchPublishing.value) {
+    return t("articles.publishSubmitting");
+  }
+
+  if (article.variant_count <= 0) {
+    return t("articles.noVariants");
+  }
+
+  if (!enabledPublishTargets.value.length) {
+    return t("articles.noEnabledPublishTargets");
+  }
+
+  const knownOptions = resolvePublishOptions(article.relative_path);
+  if ((articleVariantSummaryMap[article.relative_path] ?? []).length && !knownOptions.length) {
+    return t("articles.noPublishableTargets");
+  }
+
+  if (knownOptions.length > 1) {
+    return t("articles.choosePublishTarget");
+  }
+
+  return t("articles.publishAction");
+}
+
+function closePublishTargetDialog() {
+  if (publishSubmitting.value) {
+    return;
+  }
+
+  publishTargetDialogOpen.value = false;
+  publishTargetDialogArticlePath.value = "";
+  publishTargetDialogArticleTitle.value = "";
+  publishTargetDialogOptions.value = [];
+}
+
+function openPublishTargetDialog(article: ArticleDocument, options: ArticlePublishOption[]) {
+  publishTargetDialogArticlePath.value = article.summary.relative_path;
+  publishTargetDialogArticleTitle.value = articleDisplayTitle(article.summary);
+  publishTargetDialogOptions.value = options;
+  publishTargetDialogOpen.value = true;
+}
+
+async function createPublishTask(request: PublishArticleRequest) {
+  const response = await apiPost<ApiResponse<PublishTaskSummary>>("/api/publish/tasks", request);
+  return response.data;
+}
+
+async function startPublishTask(relativePath: string, option: ArticlePublishOption) {
+  clearArticleFeedback();
+  publishSubmitting.value = true;
+  publishingArticlePath.value = relativePath;
+
+  try {
+    const task = await createPublishTask({
+      article_relative_path: relativePath,
+      target_id: option.targetId,
+      mode: "draft"
+    });
+    articleStore.lastMessage = t("messages.articles.publishTaskCreated", {
+      title:
+        publishTargetDialogArticlePath.value === relativePath && publishTargetDialogArticleTitle.value
+          ? publishTargetDialogArticleTitle.value
+          : articleDisplayTitle(
+              sortedArticles.value.find((article) => article.relative_path === relativePath) ?? {
+                title: "",
+                name: "",
+                relative_path: relativePath
+              }
+            ),
+      target: option.targetName
+    });
+    closePublishTargetDialog();
+    await router.push({
+      path: "/tasks",
+      query: {
+        kind: "publish",
+        task: task.id
+      }
+    });
+  } catch (error) {
+    articleStore.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    publishSubmitting.value = false;
+    publishingArticlePath.value = "";
+  }
+}
+
+async function publishArticle(relativePath: string) {
+  clearArticleFeedback();
+
+  const article = sortedArticles.value.find((item) => item.relative_path === relativePath);
+  if (!article) {
+    articleStore.error = t("articles.publishUnavailable");
+    return;
+  }
+
+  if (article.variant_count <= 0) {
+    articleStore.error = t("articles.noVariants");
+    return;
+  }
+
+  if (!enabledPublishTargets.value.length) {
+    articleStore.error = t("articles.noEnabledPublishTargets");
+    return;
+  }
+
+  try {
+    const document = await fetchArticleDocument(relativePath);
+    const options = resolvePublishOptions(relativePath);
+
+    if (!options.length) {
+      articleStore.error = t("articles.noPublishableTargets");
+      return;
+    }
+
+    if (options.length === 1) {
+      await startPublishTask(relativePath, options[0]);
+      return;
+    }
+
+    openPublishTargetDialog(document, options);
+  } catch (error) {
+    articleStore.error = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function publishSelectedArticles() {
+  clearArticleFeedback();
+
+  if (!selectedPaths.value.length) {
+    articleStore.error = t("articles.batchPublishSelectFirst");
+    return;
+  }
+
+  if (selectedPaths.value.length === 1) {
+    await publishArticle(selectedPaths.value[0]);
+    return;
+  }
+
+  if (!enabledPublishTargets.value.length) {
+    articleStore.error = t("articles.noEnabledPublishTargets");
+    return;
+  }
+
+  batchPublishing.value = true;
+
+  try {
+    const articleDocuments = await Promise.all(selectedPaths.value.map((relativePath) => fetchArticleDocument(relativePath)));
+    const articlesWithoutTargets = articleDocuments.filter(
+      (article) => resolvePublishOptions(article.summary.relative_path).length === 0
+    );
+    if (articlesWithoutTargets.length) {
+      articleStore.error = t("articles.batchPublishNoTargetArticles", {
+        count: articlesWithoutTargets.length
+      });
+      return;
+    }
+
+    const articlesWithMultipleTargets = articleDocuments.filter(
+      (article) => resolvePublishOptions(article.summary.relative_path).length > 1
+    );
+    if (articlesWithMultipleTargets.length) {
+      articleStore.error = t("articles.batchPublishMultipleTargets", {
+        count: articlesWithMultipleTargets.length
+      });
+      return;
+    }
+
+    for (const article of articleDocuments) {
+      const option = resolvePublishOptions(article.summary.relative_path)[0];
+      await createPublishTask({
+        article_relative_path: article.summary.relative_path,
+        target_id: option.targetId,
+        mode: "draft"
+      });
+    }
+
+    articleStore.lastMessage = t("messages.articles.batchPublishTaskCreated", {
+      count: articleDocuments.length
+    });
+    selectedPaths.value = [];
+    batchMode.value = false;
+  } catch (error) {
+    articleStore.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    batchPublishing.value = false;
+  }
 }
 
 function getArticleEditorWorkspaceStyle() {
@@ -431,6 +740,7 @@ async function performDeleteArticle(relativePath: string) {
     }
 
     resetPreview(relativePath);
+    delete articleVariantSummaryMap[relativePath];
     articleStore.lastMessage = t("messages.articles.deleted");
     await articleStore.loadAll();
   } catch (error) {
@@ -480,6 +790,11 @@ watch(
     articles.forEach((article) => void ensurePreview(article.relative_path));
     const available = new Set(sortedArticles.value.map((item) => item.relative_path));
     selectedPaths.value = selectedPaths.value.filter((path) => available.has(path));
+    Object.keys(articleVariantSummaryMap).forEach((path) => {
+      if (!available.has(path)) {
+        delete articleVariantSummaryMap[path];
+      }
+    });
   },
   { immediate: true }
 );
@@ -609,7 +924,13 @@ onBeforeUnmount(() => {
               </button>
 
               <div v-if="batchMode" class="aiw-batch-sub-actions">
-                <button class="btn btn-secondary" type="button" disabled :title="t('articles.publishUnavailable')">
+                <button
+                  class="btn btn-secondary"
+                  type="button"
+                  :disabled="batchPublishButtonDisabled"
+                  :title="batchPublishButtonTitle"
+                  @click="publishSelectedArticles"
+                >
                   <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M22 2L11 13" />
                     <path d="M22 2l-7 20-4-9-9-4 20-7z" />
@@ -688,7 +1009,13 @@ onBeforeUnmount(() => {
                     <path d="M10 10l4 4" />
                   </svg>
                 </button>
-                <button class="aiw-card-action-btn" type="button" disabled :title="t('articles.publishUnavailable')">
+                <button
+                  class="aiw-card-action-btn"
+                  type="button"
+                  :disabled="!canPublishArticle(article) || batchPublishing"
+                  :title="articlePublishButtonTitle(article)"
+                  @click.stop="publishArticle(article.relative_path)"
+                >
                   <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8">
                     <path d="M22 2L11 13" />
                     <path d="M22 2l-7 20-4-9-9-4 20-7z" />
@@ -848,6 +1175,46 @@ onBeforeUnmount(() => {
 
     <div v-if="articleStore.lastMessage" class="banner banner-success">{{ articleStore.lastMessage }}</div>
     <div v-if="articleStore.error" class="banner banner-error">{{ articleStore.error }}</div>
+
+    <div
+      v-if="publishTargetDialogOpen"
+      class="config-modal-backdrop aiw-publish-target-backdrop"
+      @click.self="closePublishTargetDialog"
+    >
+      <div class="config-modal aiw-publish-target-modal">
+        <div class="config-modal__header">
+          <div>
+            <p class="eyebrow">{{ t("articles.publishAction") }}</p>
+            <h3 class="panel-title">{{ t("articles.publishTargetDialogTitle") }}</h3>
+            <p class="template-copy">{{ t("articles.publishTargetPrompt", { title: publishTargetDialogArticleTitle }) }}</p>
+          </div>
+          <button class="ghost-action" type="button" :disabled="publishSubmitting" @click="closePublishTargetDialog">
+            {{ t("common.cancel") }}
+          </button>
+        </div>
+
+        <div class="aiw-publish-target-list">
+          <button
+            v-for="option in publishTargetDialogOptions"
+            :key="option.targetId"
+            class="aiw-publish-target-option"
+            type="button"
+            :disabled="publishSubmitting"
+            @click="startPublishTask(publishTargetDialogArticlePath, option)"
+          >
+            <div class="aiw-publish-target-option__copy">
+              <strong>{{ option.targetName }}</strong>
+              <span>
+                {{ t("articles.publishTargetMeta", { platform: publishPlatformLabel(option.platformType), format: option.format }) }}
+              </span>
+            </div>
+            <span class="aiw-publish-target-option__action">
+              {{ publishSubmitting ? t("articles.publishSubmitting") : t("articles.publishAction") }}
+            </span>
+          </button>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -1240,6 +1607,74 @@ onBeforeUnmount(() => {
 .aiw-card-action-btn:disabled {
   opacity: 0.42;
   cursor: not-allowed;
+}
+
+.aiw-publish-target-backdrop {
+  padding: 24px;
+}
+
+.aiw-publish-target-modal {
+  width: min(620px, 94vw);
+  display: grid;
+  gap: 18px;
+}
+
+.aiw-publish-target-list {
+  display: grid;
+  gap: 12px;
+}
+
+.aiw-publish-target-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 16px 18px;
+  border: 1px solid var(--aiw-border);
+  border-radius: 14px;
+  background: #ffffff;
+  color: var(--aiw-ink);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.aiw-publish-target-option:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(49, 101, 235, 0.34);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+}
+
+.aiw-publish-target-option:disabled {
+  opacity: 0.72;
+  cursor: progress;
+}
+
+.aiw-publish-target-option__copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.aiw-publish-target-option__copy strong,
+.aiw-publish-target-option__copy span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.aiw-publish-target-option__copy span {
+  color: var(--aiw-ink-soft);
+  font-size: 13px;
+}
+
+.aiw-publish-target-option__action {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--aiw-primary);
 }
 
 .aiw-checkbox-wrapper {

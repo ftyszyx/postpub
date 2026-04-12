@@ -263,6 +263,14 @@ impl Publisher for WechatPublisher {
             Some(browser_profile),
         );
         reporter.report(
+            "wechat.browser.mode",
+            if runtime.is_headed() {
+                "使用可视浏览器窗口执行发布流程"
+            } else {
+                "使用 headless 模式执行发布流程"
+            },
+        );
+        reporter.report(
             "wechat.browser.session",
             format!("using agent-browser session {}", runtime.session_name()),
         );

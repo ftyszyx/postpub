@@ -124,7 +124,7 @@ impl AgentBrowserRuntime {
         Self {
             program: resolve_agent_browser_program(),
             session_name: session_name.into(),
-            headed: env_flag("POSTPUB_AGENT_BROWSER_HEADED"),
+            headed: env_flag_with_default("POSTPUB_AGENT_BROWSER_HEADED", true),
             browser_executable,
             browser_profile,
         }
@@ -136,6 +136,10 @@ impl AgentBrowserRuntime {
 
     pub(crate) fn session_name(&self) -> &str {
         &self.session_name
+    }
+
+    pub(crate) fn is_headed(&self) -> bool {
+        self.headed
     }
 
     pub(crate) async fn close(&self) -> Result<()> {
@@ -372,12 +376,12 @@ impl BrowserRuntime for AgentBrowserRuntime {
     }
 }
 
-fn env_flag(name: &str) -> bool {
-    matches!(
-        env::var(name)
-            .ok()
-            .as_deref()
-            .map(|value| value.trim().to_ascii_lowercase()),
-        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
-    )
+fn env_flag_with_default(name: &str, default: bool) -> bool {
+    match env::var(name).ok() {
+        Some(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        None => default,
+    }
 }

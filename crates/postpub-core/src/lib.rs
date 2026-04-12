@@ -7,6 +7,7 @@ mod generation;
 mod paths;
 mod publish;
 mod templates;
+mod text;
 
 use chrono::Utc;
 use postpub_types::HealthStatus;

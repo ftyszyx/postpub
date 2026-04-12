@@ -2,8 +2,8 @@ import { createRouter, createWebHashHistory } from "vue-router";
 import ArticlesView from "../views/ArticlesView.vue";
 import ConfigView from "../views/ConfigView.vue";
 import GenerationView from "../views/GenerationView.vue";
-import GenerationTasksView from "../views/GenerationTasksView.vue";
 import OverviewView from "../views/OverviewView.vue";
+import TaskStatusView from "../views/TaskStatusView.vue";
 import TemplatesView from "../views/TemplatesView.vue";
 
 const router = createRouter({
@@ -41,8 +41,8 @@ const router = createRouter({
     },
     {
       path: "/tasks",
-      name: "generation-tasks",
-      component: GenerationTasksView,
+      name: "task-status",
+      component: TaskStatusView,
       meta: { title: "Task Status" }
     }
   ]

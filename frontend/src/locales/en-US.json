@@ -316,9 +316,20 @@
     "batchMode": "Batch actions",
     "batchPublish": "Batch publish",
     "batchDelete": "Batch delete",
+    "batchPublishSelectFirst": "Select at least one article to publish",
+    "batchPublishNoTargetArticles": "{count} selected articles do not have a publishable target.",
+    "batchPublishMultipleTargets": "{count} selected articles have multiple publish targets. Publish them one by one instead.",
     "selectedCount": "({count} selected)",
     "openEditor": "Open editor",
-    "publishUnavailable": "Publishing is not connected yet",
+    "publishUnavailable": "Publishing is unavailable for this article",
+    "publishAction": "Publish",
+    "publishSubmitting": "Creating publish task...",
+    "choosePublishTarget": "Choose a publish target",
+    "publishTargetDialogTitle": "Choose publish target",
+    "publishTargetPrompt": "Choose where to publish \"{title}\".",
+    "publishTargetMeta": "{platform} · {format}",
+    "noEnabledPublishTargets": "No enabled publish target is available. Enable one in configuration first.",
+    "noPublishableTargets": "This article does not have a publishable variant for any enabled target.",
     "variantCount": "{count} variants",
     "variantsTitle": "Publish variants",
     "noVariants": "No publish variants have been generated for this article yet.",
@@ -331,6 +342,68 @@
       "published": "Published",
       "failed": "Failed",
       "unpublished": "Unpublished"
+    }
+  },
+  "taskStatusPage": {
+    "switchLabel": "Task type switch",
+    "tabs": {
+      "generation": "Generation tasks",
+      "publish": "Publish tasks"
+    }
+  },
+  "publish": {
+    "noTaskYet": "No publish task yet",
+    "taskListTitle": "Publish task list",
+    "taskDetailTitle": "Publish task details",
+    "taskListEmpty": "No publish task yet. Start one from the article list first.",
+    "detailEmpty": "Select a publish task on the left to inspect its status, request, and event stream.",
+    "currentStepTitle": "Current step",
+    "currentStepEmpty": "No publish step has been recorded yet.",
+    "latestEvents": "Latest events",
+    "requestSummaryTitle": "Request summary",
+    "outputSummaryTitle": "Publish result",
+    "taskSearchPlaceholder": "Search by article path, task ID, target ID, or status",
+    "viewDetails": "View details",
+    "retryTask": "Retry",
+    "retryTaskSuccess": "Retry started on the current publish task",
+    "eventCount": "Events",
+    "outputReady": "Ready",
+    "outputMissing": "Not ready",
+    "outputState": "Output state",
+    "logsEmpty": "Start a publish task and the runtime logs will stream here.",
+    "fields": {
+      "article": "Article",
+      "target": "Target",
+      "targetId": "Target ID",
+      "platform": "Platform",
+      "remoteUrl": "Remote URL"
+    },
+    "taskStatus": {
+      "Pending": "Pending",
+      "Running": "Running",
+      "Succeeded": "Succeeded",
+      "Failed": "Failed"
+    },
+    "eventStatus": {
+      "pending": "Pending",
+      "current": "Current",
+      "completed": "Completed",
+      "failed": "Failed"
+    },
+    "stages": {
+      "bootstrap": "Task accepted",
+      "prepare": "Prepare",
+      "target": "Resolve target",
+      "variant": "Resolve variant",
+      "platform": "Platform adapter",
+      "finalize": "Finalize",
+      "done": "Completed",
+      "failed": "Failed",
+      "unknown": "Unknown stage: {stage}"
+    },
+    "modes": {
+      "draft": "Draft",
+      "publish": "Publish"
     }
   },
   "generation": {
@@ -481,7 +554,9 @@
     },
     "articles": {
       "saved": "Article saved",
-      "deleted": "Article deleted"
+      "deleted": "Article deleted",
+      "publishTaskCreated": "Created a publish task for \"{title}\" to {target}",
+      "batchPublishTaskCreated": "Created publish tasks for {count} articles"
     }
   }
 }

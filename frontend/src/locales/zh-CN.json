@@ -316,9 +316,20 @@
     "batchMode": "批量操作",
     "batchPublish": "批量发布",
     "batchDelete": "批量删除",
+    "batchPublishSelectFirst": "请先选择至少一篇文章",
+    "batchPublishNoTargetArticles": "所选文章中有 {count} 篇没有可发布目标，请先检查变体或发布平台配置。",
+    "batchPublishMultipleTargets": "所选文章中有 {count} 篇存在多个发布目标，请改为逐篇发布后再选择目标。",
     "selectedCount": "（已选 {count}）",
     "openEditor": "打开编辑器",
-    "publishUnavailable": "发布能力暂未接入",
+    "publishUnavailable": "当前文章暂时无法发布",
+    "publishAction": "发布",
+    "publishSubmitting": "正在创建发布任务...",
+    "choosePublishTarget": "选择发布目标",
+    "publishTargetDialogTitle": "选择发布目标",
+    "publishTargetPrompt": "为《{title}》选择一个发布目标。",
+    "publishTargetMeta": "{platform} · {format}",
+    "noEnabledPublishTargets": "当前没有启用的发布平台，请先到配置中启用。",
+    "noPublishableTargets": "这篇文章在已启用的平台中没有可发布的变体。",
     "variantCount": "{count} 个变体",
     "variantsTitle": "发布变体",
     "noVariants": "当前文章还没有生成任何发布变体。",
@@ -331,6 +342,68 @@
       "published": "已发布",
       "failed": "发布失败",
       "unpublished": "未发布"
+    }
+  },
+  "taskStatusPage": {
+    "switchLabel": "任务类型切换",
+    "tabs": {
+      "generation": "生成任务",
+      "publish": "发布任务"
+    }
+  },
+  "publish": {
+    "noTaskYet": "还没有发布任务",
+    "taskListTitle": "发布任务列表",
+    "taskDetailTitle": "发布任务详情",
+    "taskListEmpty": "还没有发布任务，先从文章列表发起一次发布。",
+    "detailEmpty": "先在左侧选择一条发布任务，这里会展示它的状态、请求参数和事件流。",
+    "currentStepTitle": "当前步骤",
+    "currentStepEmpty": "暂时还没有记录到发布步骤。",
+    "latestEvents": "最新事件",
+    "requestSummaryTitle": "请求参数",
+    "outputSummaryTitle": "发布结果",
+    "taskSearchPlaceholder": "按文章路径、任务 ID、目标 ID、状态搜索",
+    "viewDetails": "查看详情",
+    "retryTask": "重试",
+    "retryTaskSuccess": "已在当前发布任务上开始重试",
+    "eventCount": "事件数",
+    "outputReady": "已生成",
+    "outputMissing": "未生成",
+    "outputState": "输出状态",
+    "logsEmpty": "开始一条发布任务后，运行日志会显示在这里。",
+    "fields": {
+      "article": "文章",
+      "target": "发布目标",
+      "targetId": "目标 ID",
+      "platform": "平台",
+      "remoteUrl": "远端地址"
+    },
+    "taskStatus": {
+      "Pending": "等待中",
+      "Running": "运行中",
+      "Succeeded": "成功",
+      "Failed": "失败"
+    },
+    "eventStatus": {
+      "pending": "等待中",
+      "current": "当前执行",
+      "completed": "已完成",
+      "failed": "失败"
+    },
+    "stages": {
+      "bootstrap": "任务已接收",
+      "prepare": "准备配置",
+      "target": "解析目标",
+      "variant": "定位变体",
+      "platform": "平台适配器",
+      "finalize": "收尾处理",
+      "done": "已完成",
+      "failed": "失败",
+      "unknown": "未知阶段：{stage}"
+    },
+    "modes": {
+      "draft": "草稿",
+      "publish": "正式发布"
     }
   },
   "generation": {
@@ -481,7 +554,9 @@
     },
     "articles": {
       "saved": "文章已保存",
-      "deleted": "文章已删除"
+      "deleted": "文章已删除",
+      "publishTaskCreated": "已为《{title}》创建发布任务，目标：{target}",
+      "batchPublishTaskCreated": "已为 {count} 篇文章创建发布任务"
     }
   }
 }
