@@ -1,414 +1,24 @@
 use std::{
-    env,
-    ffi::OsString,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 
 use async_trait::async_trait;
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use postpub_types::{
     ArticleDesign, ArticleDocument, ArticleVariantDocument, PublishArticleRequest, PublishOutput,
     PublishTargetConfig,
 };
 use regex::Regex;
 use tokio::{
-    io::AsyncWriteExt,
     process::Command,
-    time::{sleep, Instant},
+    time::{sleep, timeout, Instant},
 };
 
 use crate::browser::{browser_profile_dir, sanitize_profile_component};
 use crate::{preview_html, AppContext, PostpubError, Result};
 
-#[derive(Clone)]
-pub struct PublishProgressReporter {
-    callback: Arc<dyn Fn(String, String) + Send + Sync>,
-}
-
-impl PublishProgressReporter {
-    pub fn new<F>(callback: F) -> Self
-    where
-        F: Fn(String, String) + Send + Sync + 'static,
-    {
-        Self {
-            callback: Arc::new(callback),
-        }
-    }
-
-    pub fn report(&self, stage: impl Into<String>, message: impl Into<String>) {
-        (self.callback)(stage.into(), message.into());
-    }
-}
-
-#[async_trait]
-pub trait BrowserRuntime: Send + Sync {
-    async fn open(&self, _url: &str) -> Result<()> {
-        Err(PostpubError::External(
-            "browser runtime is not configured yet".to_string(),
-        ))
-    }
-
-    async fn click(&self, _selector: &str) -> Result<()> {
-        Err(PostpubError::External(
-            "browser runtime is not configured yet".to_string(),
-        ))
-    }
-
-    async fn fill(&self, _selector: &str, _text: &str) -> Result<()> {
-        Err(PostpubError::External(
-            "browser runtime is not configured yet".to_string(),
-        ))
-    }
-
-    async fn upload(&self, _selector: &str, _files: &[String]) -> Result<()> {
-        Err(PostpubError::External(
-            "browser runtime is not configured yet".to_string(),
-        ))
-    }
-
-    async fn get_url(&self) -> Result<String> {
-        Err(PostpubError::External(
-            "browser runtime is not configured yet".to_string(),
-        ))
-    }
-
-    async fn get_text(&self, _selector: &str) -> Result<String> {
-        Err(PostpubError::External(
-            "browser runtime is not configured yet".to_string(),
-        ))
-    }
-
-    async fn evaluate(&self, _script: &str) -> Result<String> {
-        Err(PostpubError::External(
-            "browser runtime is not configured yet".to_string(),
-        ))
-    }
-
-    async fn press(&self, _key: &str) -> Result<()> {
-        Err(PostpubError::External(
-            "browser runtime is not configured yet".to_string(),
-        ))
-    }
-
-    async fn keyboard_insert_text(&self, _text: &str) -> Result<()> {
-        Err(PostpubError::External(
-            "browser runtime is not configured yet".to_string(),
-        ))
-    }
-
-    async fn wait_load(&self, _state: &str) -> Result<()> {
-        Err(PostpubError::External(
-            "browser runtime is not configured yet".to_string(),
-        ))
-    }
-
-    async fn wait_ms(&self, _ms: u64) -> Result<()> {
-        Err(PostpubError::External(
-            "browser runtime is not configured yet".to_string(),
-        ))
-    }
-
-    async fn screenshot(&self, _path: &Path) -> Result<()> {
-        Err(PostpubError::External(
-            "browser runtime is not configured yet".to_string(),
-        ))
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct AgentBrowserRuntime {
-    program: OsString,
-    session_name: String,
-    headed: bool,
-    browser_executable: Option<PathBuf>,
-    browser_profile: Option<PathBuf>,
-}
-
-impl AgentBrowserRuntime {
-    pub fn new(
-        session_name: impl Into<String>,
-        browser_executable: Option<PathBuf>,
-        browser_profile: Option<PathBuf>,
-    ) -> Self {
-        Self {
-            program: resolve_agent_browser_program(),
-            session_name: session_name.into(),
-            headed: env_flag("POSTPUB_AGENT_BROWSER_HEADED"),
-            browser_executable,
-            browser_profile,
-        }
-    }
-
-    async fn run(&self, args: &[&str]) -> Result<String> {
-        self.run_with_stdin(args, None).await
-    }
-
-    async fn run_with_stdin(&self, args: &[&str], stdin: Option<&str>) -> Result<String> {
-        let mut command = build_agent_browser_command(&self.program);
-        if self.headed {
-            command.arg("--headed");
-        }
-        if let Some(path) = &self.browser_executable {
-            command.arg("--executable-path").arg(path);
-        }
-        if let Some(path) = &self.browser_profile {
-            command.arg("--profile").arg(path);
-        }
-        command.arg("--session-name").arg(&self.session_name);
-        command.args(args);
-        if stdin.is_some() {
-            command.stdin(std::process::Stdio::piped());
-        }
-        command.stdout(std::process::Stdio::piped());
-        command.stderr(std::process::Stdio::piped());
-
-        let mut child = command.spawn()?;
-        if let Some(payload) = stdin {
-            let Some(mut handle) = child.stdin.take() else {
-                return Err(PostpubError::External(
-                    "agent-browser stdin is unavailable".to_string(),
-                ));
-            };
-            handle.write_all(payload.as_bytes()).await?;
-            handle.shutdown().await?;
-        }
-
-        let output = child.wait_with_output().await?;
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-
-        if output.status.success() {
-            Ok(stdout)
-        } else {
-            let detail = if !stderr.is_empty() { stderr } else { stdout };
-            Err(PostpubError::External(format!(
-                "agent-browser {} failed: {}",
-                args.join(" "),
-                detail
-            )))
-        }
-    }
-}
-
-fn resolve_agent_browser_program() -> OsString {
-    if let Some(path) = env::var_os("POSTPUB_AGENT_BROWSER_BIN") {
-        return path;
-    }
-
-    #[cfg(windows)]
-    let candidates = ["agent-browser.cmd", "agent-browser.exe", "agent-browser.bat"];
-    #[cfg(not(windows))]
-    let candidates = ["agent-browser"];
-
-    if let Some(path) = find_program_in_path(&candidates) {
-        return path.into_os_string();
-    }
-
-    #[cfg(windows)]
-    {
-        OsString::from("agent-browser.cmd")
-    }
-    #[cfg(not(windows))]
-    {
-        OsString::from("agent-browser")
-    }
-}
-
-fn find_program_in_path(candidates: &[&str]) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-
-    for directory in env::split_paths(&path) {
-        for candidate in candidates {
-            let full_path = directory.join(candidate);
-            if full_path.is_file() {
-                return Some(full_path);
-            }
-        }
-    }
-
-    None
-}
-
-fn build_agent_browser_command(program: &OsString) -> Command {
-    let extension = Path::new(program)
-        .extension()
-        .and_then(|item| item.to_str())
-        .map(|item| item.to_ascii_lowercase());
-
-    match extension.as_deref() {
-        Some("cmd") | Some("bat") => {
-            let mut command = Command::new("cmd");
-            command.arg("/C").arg(program);
-            command
-        }
-        Some("ps1") => {
-            let mut command = Command::new("powershell");
-            command
-                .arg("-NoProfile")
-                .arg("-ExecutionPolicy")
-                .arg("Bypass")
-                .arg("-File")
-                .arg(program);
-            command
-        }
-        _ => Command::new(program),
-    }
-}
-
-#[async_trait]
-impl BrowserRuntime for AgentBrowserRuntime {
-    async fn open(&self, url: &str) -> Result<()> {
-        self.run(&["open", url]).await.map(|_| ())
-    }
-
-    async fn click(&self, selector: &str) -> Result<()> {
-        self.run(&["click", selector]).await.map(|_| ())
-    }
-
-    async fn fill(&self, selector: &str, text: &str) -> Result<()> {
-        self.run(&["fill", selector, text]).await.map(|_| ())
-    }
-
-    async fn upload(&self, selector: &str, files: &[String]) -> Result<()> {
-        let mut args = vec!["upload", selector];
-        let owned_files: Vec<&str> = files.iter().map(|item| item.as_str()).collect();
-        args.extend(owned_files);
-        self.run(&args).await.map(|_| ())
-    }
-
-    async fn get_url(&self) -> Result<String> {
-        self.run(&["get", "url"]).await
-    }
-
-    async fn get_text(&self, selector: &str) -> Result<String> {
-        self.run(&["get", "text", selector]).await
-    }
-
-    async fn evaluate(&self, script: &str) -> Result<String> {
-        let encoded = BASE64_STANDARD.encode(script.as_bytes());
-        self.run(&["eval", "-b", &encoded]).await
-    }
-
-    async fn press(&self, key: &str) -> Result<()> {
-        self.run(&["press", key]).await.map(|_| ())
-    }
-
-    async fn keyboard_insert_text(&self, text: &str) -> Result<()> {
-        self.run(&["keyboard", "inserttext", text])
-            .await
-            .map(|_| ())
-    }
-
-    async fn wait_load(&self, state: &str) -> Result<()> {
-        self.run(&["wait", "--load", state]).await.map(|_| ())
-    }
-
-    async fn wait_ms(&self, ms: u64) -> Result<()> {
-        self.run(&["wait", &ms.to_string()]).await.map(|_| ())
-    }
-
-    async fn screenshot(&self, path: &Path) -> Result<()> {
-        let path_string = path.to_string_lossy().to_string();
-        self.run(&["screenshot", &path_string]).await.map(|_| ())
-    }
-}
-
-#[async_trait]
-pub trait Publisher: Send + Sync {
-    fn platform_type(&self) -> &'static str;
-
-    async fn publish(
-        &self,
-        target: &PublishTargetConfig,
-        article: &ArticleDocument,
-        variant: &ArticleVariantDocument,
-        request: &PublishArticleRequest,
-        reporter: &PublishProgressReporter,
-    ) -> Result<PublishOutput>;
-}
-
-pub struct PublishService {
-    context: AppContext,
-}
-
-impl PublishService {
-    pub fn new(context: AppContext) -> Self {
-        Self { context }
-    }
-
-    pub async fn publish_with_progress(
-        &self,
-        request: PublishArticleRequest,
-        reporter: PublishProgressReporter,
-    ) -> Result<PublishOutput> {
-        let mode = request.mode.trim().to_lowercase();
-        if mode != "draft" && mode != "publish" {
-            return Err(PostpubError::Validation(format!(
-                "unsupported publish mode: {}",
-                request.mode
-            )));
-        }
-
-        reporter.report(
-            "prepare",
-            format!("加载文章 {}", request.article_relative_path),
-        );
-        let article = self
-            .context
-            .article_store()
-            .get_article(&request.article_relative_path)?;
-
-        reporter.report("target", format!("解析发布目标 {}", request.target_id));
-        let bundle = self.context.config_store().load_bundle()?;
-        let target = bundle
-            .config
-            .publish_targets
-            .into_iter()
-            .find(|item| item.id == request.target_id)
-            .ok_or_else(|| {
-                PostpubError::NotFound(format!("publish target not found: {}", request.target_id))
-            })?;
-
-        if !target.enabled {
-            return Err(PostpubError::Conflict(format!(
-                "publish target is disabled: {}",
-                target.id
-            )));
-        }
-
-        reporter.report("variant", format!("定位文章变体 {}", request.target_id));
-        let variant = article
-            .variants
-            .iter()
-            .find(|item| item.summary.target_id == request.target_id)
-            .ok_or_else(|| {
-                PostpubError::NotFound(format!(
-                    "article variant not found for target: {}",
-                    request.target_id
-                ))
-            })?;
-
-        reporter.report(
-            "platform",
-            format!("调用平台适配器 {}", target.platform_type),
-        );
-        match target.platform_type.as_str() {
-            "wechat" => {
-                let publisher = WechatPublisher::new(self.context.clone());
-                publisher
-                    .publish(&target, &article, variant, &request, &reporter)
-                    .await
-            }
-            other => Err(PostpubError::Validation(format!(
-                "publish platform is not supported yet: {other}"
-            ))),
-        }
-    }
-}
-
+use super::{runtime::AgentBrowserRuntime, BrowserRuntime, PublishProgressReporter, Publisher};
 #[derive(Clone)]
 pub struct WechatPublisher {
     context: AppContext,
@@ -452,23 +62,27 @@ impl WechatPublisher {
         let origin = wechat_origin(&target.publish_url)?;
         validate_wechat_supported_settings(target)?;
 
-        reporter.report("wechat.browser", "启动 agent-browser 会话");
-        runtime.open(&target.publish_url).await?;
+        reporter.report("wechat.browser", "starting agent-browser session");
+        reporter.report("wechat.browser.open", "opening wechat dashboard");
+        open_with_recovery(runtime, &target.publish_url, reporter, "wechat.browser").await?;
+        reporter.report("wechat.browser.opened", "wechat dashboard opened");
         wait_until_true(
             runtime,
             r#"(() => document.readyState === "complete")()"#,
             Duration::from_secs(15),
         )
         .await?;
+        reporter.report("wechat.browser.ready", "wechat dashboard is ready");
 
-        reporter.report("wechat.auth", "检查微信公众号登录状态");
+        reporter.report("wechat.auth", "checking wechat login state");
         let current_url = runtime.get_url().await?;
+        reporter.report("wechat.auth.url", format!("current page {current_url}"));
         let Some(token) = extract_query_value(&current_url, "token") else {
             let body_text = runtime.get_text("body").await.unwrap_or_default();
             if body_text.contains("使用账号登录") || body_text.contains("登录") {
                 return Err(PostpubError::External(format!(
-                    "wechat login is required. Please log in once with agent-browser session '{}'",
-                    resolve_wechat_session_name(target)
+                    "wechat login is required. Please log in once with the browser profile for target '{}'",
+                    target.id
                 )));
             }
             return Err(PostpubError::External(format!(
@@ -476,23 +90,30 @@ impl WechatPublisher {
             )));
         };
 
-        let draft_url = format!(
-            "{origin}/cgi-bin/appmsg?begin=0&count=10&type=77&action=list_card&token={token}&lang=zh_CN"
-        );
-        reporter.report("wechat.navigate", "进入草稿箱");
-        runtime.open(&draft_url).await?;
-        wait_for_text(runtime, "新的创作", Duration::from_secs(15)).await?;
+        let editor_opened_directly =
+            try_open_wechat_editor_direct(runtime, &origin, &token, reporter).await?;
+        if !editor_opened_directly {
+            let draft_url = format!(
+                "{origin}/cgi-bin/appmsg?begin=0&count=10&type=77&action=list_card&token={token}&lang=zh_CN"
+            );
+            reporter.report("wechat.navigate", "opening draft box");
+            reporter.report("wechat.navigate.open", "opening draft list page");
+            navigate_with_recovery(runtime, &draft_url, reporter, "wechat.navigate").await?;
+            reporter.report("wechat.navigate.opened", "draft list page opened");
+            wait_for_text(runtime, "新的创作", Duration::from_secs(15)).await?;
+            reporter.report("wechat.navigate.ready", "draft list page is ready");
 
-        reporter.report("wechat.editor", "打开新文章编辑页");
-        click_by_text(runtime, "新的创作", true).await?;
-        wait_for_text(runtime, "写新文章", Duration::from_secs(10)).await?;
-        click_by_text(runtime, "写新文章", true).await?;
-        wait_until_true(
-            runtime,
-            r#"(() => !!document.querySelector(".js_title") && !!document.querySelector(".ProseMirror"))()"#,
-            Duration::from_secs(15),
-        )
-        .await?;
+            reporter.report("wechat.editor", "opening new article editor");
+            click_by_text(runtime, "新的创作", true).await?;
+            wait_for_text(runtime, "写新文章", Duration::from_secs(10)).await?;
+            click_by_text(runtime, "写新文章", true).await?;
+            wait_until_true(
+                runtime,
+                r#"(() => !!document.querySelector(".js_title") && !!document.querySelector(".ProseMirror"))()"#,
+                Duration::from_secs(15),
+            )
+            .await?;
+        }
 
         reporter.report("wechat.title", "填写文章标题");
         runtime.fill(".js_title", &title).await?;
@@ -517,20 +138,38 @@ impl WechatPublisher {
         .await?;
 
         reporter.report("wechat.cover", "打开封面选择面板");
-        runtime.click("#js_cover_area").await?;
-        wait_until_true(
+        click_first_visible_selector(
             runtime,
-            r##"(() => !!document.querySelector("#js_cover_area .js_imagedialog"))()"##,
+            &[
+                "#js_cover_area .js_cover_btn_area",
+                "#js_cover_area #js_cover_null",
+                "#js_cover_area",
+            ],
+        )
+        .await?;
+        wait_for_any_visible_selector(
+            runtime,
+            &[
+                "#js_cover_area #js_cover_null .js_imagedialog",
+                "#js_cover_area .js_cover_opr .js_imagedialog",
+            ],
             Duration::from_secs(10),
         )
         .await?;
 
         reporter.report("wechat.cover.upload", "进入图片库并上传封面");
-        runtime.click("#js_cover_area .js_imagedialog").await?;
+        click_first_visible_selector(
+            runtime,
+            &[
+                "#js_cover_area #js_cover_null .js_imagedialog",
+                "#js_cover_area .js_cover_opr .js_imagedialog",
+            ],
+        )
+        .await?;
         wait_for_text(runtime, "选择图片", Duration::from_secs(10)).await?;
         runtime
             .upload(
-                r#"div[id^="rt_"] input[type="file"]"#,
+                r#".weui-desktop-dialog_img-picker .weui-desktop-upload input[type="file"]"#,
                 &[cover_path.to_string_lossy().to_string()],
             )
             .await?;
@@ -609,17 +248,38 @@ impl Publisher for WechatPublisher {
         );
         let browser_profile = resolve_browser_profile_dir(&self.context, target)?;
         fs::create_dir_all(&browser_profile)?;
+        cleanup_wechat_browser_runtime(target, &browser_executable, &browser_profile, reporter)
+            .await?;
         reporter.report(
             "wechat.browser.profile",
-            format!("使用独立浏览器环境 {}", browser_profile.display()),
+            format!(
+                "using isolated browser profile {}",
+                browser_profile.display()
+            ),
         );
         let runtime = AgentBrowserRuntime::new(
             resolve_wechat_session_name(target),
             Some(browser_executable),
             Some(browser_profile),
         );
-        self.publish_with_runtime(&runtime, target, article, variant, request, reporter)
-            .await
+        reporter.report(
+            "wechat.browser.session",
+            format!("using agent-browser session {}", runtime.session_name()),
+        );
+        let publish_result = self
+            .publish_with_runtime(&runtime, target, article, variant, request, reporter)
+            .await;
+
+        reporter.report("wechat.browser.close", "closing agent-browser session");
+        match runtime.close().await {
+            Ok(()) => reporter.report("wechat.browser.closed", "agent-browser session closed"),
+            Err(error) => reporter.report(
+                "wechat.browser.close_error",
+                format!("failed to close agent-browser session: {error}"),
+            ),
+        }
+
+        publish_result
     }
 }
 
@@ -645,17 +305,27 @@ fn article_body_html(article: &ArticleDocument, variant: &ArticleVariantDocument
 }
 
 fn resolve_wechat_session_name(target: &PublishTargetConfig) -> String {
-    env::var("POSTPUB_AGENT_BROWSER_SESSION_NAME")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| {
-            let suffix = sanitize_profile_component(if target.id.trim().is_empty() {
-                "default"
-            } else {
-                target.id.trim()
-            });
-            format!("postpub-{}-{suffix}", target.platform_type.trim())
-        })
+    if let Ok(value) = env::var("POSTPUB_AGENT_BROWSER_SESSION_NAME") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    format!(
+        "{}-{}",
+        resolve_wechat_session_prefix(target),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+fn resolve_wechat_session_prefix(target: &PublishTargetConfig) -> String {
+    let suffix = sanitize_profile_component(if target.id.trim().is_empty() {
+        "default"
+    } else {
+        target.id.trim()
+    });
+    format!("postpub-{}-{suffix}", target.platform_type.trim())
 }
 
 fn resolve_browser_profile_dir(
@@ -683,6 +353,307 @@ fn resolve_browser_profile_dir(
             target.id.trim()
         },
     ))
+}
+
+#[derive(Default)]
+struct BrowserCleanupStats {
+    daemon_processes_killed: usize,
+    browser_processes_killed: usize,
+    session_files_removed: usize,
+    profile_lock_files_removed: usize,
+}
+
+async fn cleanup_wechat_browser_runtime(
+    target: &PublishTargetConfig,
+    browser_executable: &Path,
+    browser_profile: &Path,
+    reporter: &PublishProgressReporter,
+) -> Result<()> {
+    reporter.report(
+        "wechat.browser.cleanup",
+        "cleaning stale agent-browser sessions and chrome processes",
+    );
+
+    let session_prefix = resolve_wechat_session_prefix(target);
+    let socket_dir = resolve_agent_browser_socket_dir();
+    let mut stats = BrowserCleanupStats::default();
+
+    stats.daemon_processes_killed =
+        kill_agent_browser_session_processes(&socket_dir, &session_prefix).await?;
+    stats.session_files_removed = remove_agent_browser_session_files(&socket_dir, &session_prefix)?;
+
+    #[cfg(windows)]
+    {
+        stats.browser_processes_killed =
+            kill_windows_browser_processes_for_profile(browser_executable, browser_profile).await?;
+    }
+
+    if stats.daemon_processes_killed > 0 || stats.browser_processes_killed > 0 {
+        reporter.report(
+            "wechat.browser.cleanup.wait",
+            "waiting for previous browser processes to release the profile",
+        );
+        sleep(Duration::from_secs(2)).await;
+    }
+
+    stats.profile_lock_files_removed = cleanup_browser_profile_lock_files(browser_profile)?;
+    reporter.report(
+        "wechat.browser.cleanup.done",
+        format!(
+            "cleanup finished: killed {} stale session processes, {} stale chrome processes, removed {} session files, removed {} profile lock files",
+            stats.daemon_processes_killed,
+            stats.browser_processes_killed,
+            stats.session_files_removed,
+            stats.profile_lock_files_removed,
+        ),
+    );
+
+    Ok(())
+}
+
+fn resolve_agent_browser_socket_dir() -> PathBuf {
+    if let Ok(dir) = env::var("AGENT_BROWSER_SOCKET_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+
+    if let Ok(dir) = env::var("XDG_RUNTIME_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join("agent-browser");
+        }
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".agent-browser");
+    }
+
+    env::temp_dir().join("agent-browser")
+}
+
+async fn kill_agent_browser_session_processes(
+    socket_dir: &Path,
+    session_prefix: &str,
+) -> Result<usize> {
+    if !socket_dir.exists() {
+        return Ok(0);
+    }
+
+    let mut killed = 0;
+    for entry in fs::read_dir(socket_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let Some(session_name) = file_name.strip_suffix(".pid") else {
+            continue;
+        };
+        if !session_name.starts_with(session_prefix) {
+            continue;
+        }
+
+        let pid = fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok());
+        let Some(pid) = pid else {
+            continue;
+        };
+
+        if terminate_process_tree(pid).await? {
+            killed += 1;
+        }
+    }
+
+    Ok(killed)
+}
+
+async fn terminate_process_tree(pid: u32) -> Result<bool> {
+    #[cfg(windows)]
+    {
+        let output = timeout(
+            Duration::from_secs(10),
+            Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F", "/T"])
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            PostpubError::External(format!(
+                "timed out while terminating stale process tree: {pid}"
+            ))
+        })??;
+        return Ok(output.status.success());
+    }
+
+    #[cfg(not(windows))]
+    {
+        let output = timeout(
+            Duration::from_secs(10),
+            Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            PostpubError::External(format!(
+                "timed out while terminating stale process tree: {pid}"
+            ))
+        })??;
+        Ok(output.status.success())
+    }
+}
+
+fn remove_agent_browser_session_files(socket_dir: &Path, session_prefix: &str) -> Result<usize> {
+    if !socket_dir.exists() {
+        return Ok(0);
+    }
+
+    const SESSION_SUFFIXES: &[&str] = &[
+        ".pid",
+        ".port",
+        ".version",
+        ".stream",
+        ".engine",
+        ".provider",
+        ".extensions",
+        ".sock",
+    ];
+
+    let mut removed = 0;
+    for entry in fs::read_dir(socket_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let matches_prefix = file_name.starts_with(session_prefix);
+        let matches_suffix = SESSION_SUFFIXES
+            .iter()
+            .any(|suffix| file_name.ends_with(suffix));
+        if !matches_prefix || !matches_suffix {
+            continue;
+        }
+
+        let path = entry.path();
+        let removed_now = if path.is_dir() {
+            fs::remove_dir_all(&path).is_ok()
+        } else {
+            fs::remove_file(&path).is_ok()
+        };
+        if removed_now {
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+#[cfg(windows)]
+async fn kill_windows_browser_processes_for_profile(
+    browser_executable: &Path,
+    browser_profile: &Path,
+) -> Result<usize> {
+    let executable = browser_executable
+        .canonicalize()
+        .ok()
+        .unwrap_or_else(|| browser_executable.to_path_buf());
+    let profile = browser_profile
+        .canonicalize()
+        .ok()
+        .unwrap_or_else(|| browser_profile.to_path_buf());
+    let executable = normalize_windows_process_match_path(&executable);
+    let profile = normalize_windows_process_match_path(&profile);
+
+    let script = r#"
+$browserPath = $env:POSTPUB_BROWSER_EXECUTABLE
+$profilePath = $env:POSTPUB_BROWSER_PROFILE
+$matched = @(
+  Get-CimInstance Win32_Process | Where-Object {
+    $_.Name -eq 'chrome.exe' -and
+    $_.ExecutablePath -and
+    ($_.ExecutablePath -ieq $browserPath) -and
+    $_.CommandLine -and
+    ($_.CommandLine -match [regex]::Escape($profilePath))
+  }
+)
+$ids = @($matched | Select-Object -ExpandProperty ProcessId)
+foreach ($id in $ids) {
+  Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+}
+Write-Output $ids.Count
+"#;
+
+    let mut command = Command::new("powershell");
+    command
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg(script)
+        .env("POSTPUB_BROWSER_EXECUTABLE", executable)
+        .env("POSTPUB_BROWSER_PROFILE", profile)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let output = timeout(Duration::from_secs(20), command.output())
+        .await
+        .map_err(|_| {
+            PostpubError::External("timed out while terminating stale chrome processes".to_string())
+        })??;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if !output.status.success() {
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        return Err(PostpubError::External(format!(
+            "failed to terminate stale chrome processes: {detail}"
+        )));
+    }
+
+    Ok(stdout.parse::<usize>().unwrap_or(0))
+}
+
+#[cfg(not(windows))]
+async fn kill_windows_browser_processes_for_profile(
+    _browser_executable: &Path,
+    _browser_profile: &Path,
+) -> Result<usize> {
+    Ok(0)
+}
+
+fn cleanup_browser_profile_lock_files(browser_profile: &Path) -> Result<usize> {
+    if !browser_profile.exists() {
+        return Ok(0);
+    }
+
+    const PROFILE_LOCK_FILES: &[&str] = &[
+        "DevToolsActivePort",
+        "lockfile",
+        "SingletonLock",
+        "SingletonCookie",
+        "SingletonSocket",
+    ];
+
+    let mut removed = 0;
+    for name in PROFILE_LOCK_FILES {
+        let path = browser_profile.join(name);
+        if !path.exists() {
+            continue;
+        }
+
+        let removed_now = if path.is_dir() {
+            fs::remove_dir_all(&path).is_ok()
+        } else {
+            fs::remove_file(&path).is_ok()
+        };
+        if removed_now {
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+#[cfg(windows)]
+fn normalize_windows_process_match_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .trim_start_matches("\\\\?\\")
+        .replace('/', "\\")
 }
 
 fn wechat_origin(publish_url: &str) -> Result<String> {
@@ -812,6 +783,39 @@ fn validate_wechat_supported_settings(target: &PublishTargetConfig) -> Result<()
     Ok(())
 }
 
+async fn try_open_wechat_editor_direct<R: BrowserRuntime>(
+    runtime: &R,
+    origin: &str,
+    token: &str,
+    reporter: &PublishProgressReporter,
+) -> Result<bool> {
+    let editor_url = format!(
+        "{origin}/cgi-bin/appmsg?t=media/appmsg_edit_v2&action=edit&isNew=1&type=77&token={token}"
+    );
+    reporter.report("wechat.editor.direct", "opening direct editor url");
+    navigate_with_recovery(runtime, &editor_url, reporter, "wechat.editor.direct").await?;
+
+    match wait_until_true(
+        runtime,
+        r#"(() => !!document.querySelector(".js_title") && !!document.querySelector(".ProseMirror"))()"#,
+        Duration::from_secs(15),
+    )
+    .await
+    {
+        Ok(()) => {
+            reporter.report("wechat.editor.ready", "direct editor page is ready");
+            Ok(true)
+        }
+        Err(_) => {
+            reporter.report(
+                "wechat.editor.direct_fallback",
+                "direct editor url did not become ready, falling back to draft box flow",
+            );
+            Ok(false)
+        }
+    }
+}
+
 async fn apply_wechat_publish_settings<R: BrowserRuntime>(
     runtime: &R,
     target: &PublishTargetConfig,
@@ -882,6 +886,35 @@ async fn click_by_text<R: BrowserRuntime>(runtime: &R, text: &str, exact: bool) 
 (() => {{
   const expected = {matcher};
   const exact = {exact};
+  const aliases =
+    ["写新文章", "写文章", "写新图文"].includes(expected)
+      ? ["写新文章", "写文章", "写新图文"]
+      : [expected];
+  const normalize = (input) => (input || "").replace(/\s+/g, " ").trim();
+  const isVisible = (node) => {{
+    if (!node) {{
+      return false;
+    }}
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }};
+  const rank = (node) => {{
+    const tag = (node.tagName || "").toLowerCase();
+    if (tag === "button" || tag === "a") {{
+      return 0;
+    }}
+    if ((node.getAttribute("role") || "").toLowerCase() === "button") {{
+      return 1;
+    }}
+    if (node.hasAttribute("tabindex")) {{
+      return 2;
+    }}
+    if (tag === "li") {{
+      return 3;
+    }}
+    return 4;
+  }};
+  const seen = new Set();
   const nodes = Array.from(document.querySelectorAll("a,button,div,li,span"));
   const candidate = nodes
     .filter((node) => {{
@@ -889,18 +922,49 @@ async fn click_by_text<R: BrowserRuntime>(runtime: &R, text: &str, exact: bool) 
       if (rect.width <= 0 || rect.height <= 0) {{
         return false;
       }}
-      const value = (node.innerText || node.textContent || "").replace(/\s+/g, " ").trim();
-      return exact ? value === expected : value.includes(expected);
+      const value = normalize(node.innerText || node.textContent || "");
+      return aliases.some((alias) => exact ? value === alias : value.includes(alias));
     }})
+    .map((node) => {{
+      const target =
+        node.closest('button,a,[role="button"],[tabindex],li') || node;
+      if (!isVisible(target)) {{
+        return null;
+      }}
+      const value = normalize(target.innerText || target.textContent || node.innerText || node.textContent || "");
+      if (seen.has(target)) {{
+        return null;
+      }}
+      seen.add(target);
+      const rect = target.getBoundingClientRect();
+      return {{
+        target,
+        value,
+        rank: rank(target),
+        area: rect.width * rect.height,
+      }};
+    }})
+    .filter(Boolean)
     .sort((left, right) => {{
-      const leftScore = (left.innerText || left.textContent || "").replace(/\s+/g, " ").trim().length;
-      const rightScore = (right.innerText || right.textContent || "").replace(/\s+/g, " ").trim().length;
-      return leftScore - rightScore;
+      return left.rank - right.rank || left.value.length - right.value.length || right.area - left.area;
     }})[0];
   if (!candidate) {{
+    const editorReady = !!document.querySelector(".js_title") && !!document.querySelector(".ProseMirror");
+    if (editorReady && ["写新文章", "写文章", "写新图文"].includes(expected)) {{
+      return true;
+    }}
     return false;
   }}
-  candidate.click();
+  const target = candidate.target;
+  target.scrollIntoView({{ block: "center", inline: "center" }});
+  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {{
+    target.dispatchEvent(
+      new MouseEvent(type, {{ bubbles: true, cancelable: true, view: window }})
+    );
+  }}
+  if (typeof target.click === "function") {{
+    target.click();
+  }}
   return true;
 }})()
 "#
@@ -944,6 +1008,83 @@ async fn click_optional_text<R: BrowserRuntime>(
     }
 
     Ok(false)
+}
+
+async fn open_with_recovery<R: BrowserRuntime>(
+    runtime: &R,
+    url: &str,
+    reporter: &PublishProgressReporter,
+    stage_prefix: &str,
+) -> Result<()> {
+    match runtime.open(url).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let message = error.to_string();
+            if !message.contains("agent-browser command timed out after 45s: open ") {
+                return Err(error);
+            }
+
+            reporter.report(
+                format!("{stage_prefix}.timeout"),
+                "page open is taking longer than expected, trying to recover the session",
+            );
+            let recovery_deadline = Instant::now() + Duration::from_secs(45);
+            let current_url = loop {
+                let _ = runtime.wait_ms(2000).await;
+                let last_error = match runtime.get_url().await {
+                    Ok(url) if !url.trim().is_empty() => break url,
+                    Ok(_) => "browser url is empty".to_string(),
+                    Err(retry_error) => retry_error.to_string(),
+                };
+
+                if Instant::now() >= recovery_deadline {
+                    return Err(PostpubError::External(format!(
+                        "browser session did not become ready after open timeout: {}",
+                        if last_error.is_empty() {
+                            message.clone()
+                        } else {
+                            last_error
+                        }
+                    )));
+                }
+            };
+            reporter.report(
+                format!("{stage_prefix}.recovered"),
+                format!("connected to page {current_url}"),
+            );
+            Ok(())
+        }
+    }
+}
+
+async fn navigate_with_recovery<R: BrowserRuntime>(
+    runtime: &R,
+    url: &str,
+    reporter: &PublishProgressReporter,
+    stage_prefix: &str,
+) -> Result<()> {
+    let url_json = serde_json::to_string(url)?;
+    let script = format!(
+        r#"
+(() => {{
+  window.location.assign({url_json});
+  return window.location.href;
+}})()
+"#
+    );
+
+    match runtime.evaluate(&script).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            reporter.report(
+                format!("{stage_prefix}.navigate_fallback"),
+                "in-page navigation failed, falling back to browser open",
+            );
+            open_with_recovery(runtime, url, reporter, stage_prefix)
+                .await
+                .map_err(|_| error)
+        }
+    }
 }
 
 async fn open_wechat_setting<R: BrowserRuntime>(runtime: &R, label: &str) -> Result<()> {
@@ -1101,19 +1242,122 @@ async fn set_editor_html<R: BrowserRuntime>(runtime: &R, html: &str) -> Result<(
     }
 }
 
+async fn click_first_visible_selector<R: BrowserRuntime>(
+    runtime: &R,
+    selectors: &[&str],
+) -> Result<()> {
+    let selectors_json = serde_json::to_string(selectors)?;
+    let script = format!(
+        r#"
+(() => {{
+  const selectors = {selectors_json};
+  const isVisible = (node) => {{
+    if (!node) {{
+      return false;
+    }}
+    const rect = node.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {{
+      return false;
+    }}
+    const style = getComputedStyle(node);
+    return style.display !== "none" && style.visibility !== "hidden";
+  }};
+
+  for (const selector of selectors) {{
+    const target = Array.from(document.querySelectorAll(selector)).find(isVisible);
+    if (!target) {{
+      continue;
+    }}
+    target.scrollIntoView({{ block: "center", inline: "center" }});
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {{
+      target.dispatchEvent(
+        new MouseEvent(type, {{ bubbles: true, cancelable: true, view: window }})
+      );
+    }}
+    if (typeof target.click === "function") {{
+      target.click();
+    }}
+    return true;
+  }}
+
+  return false;
+}})()
+"#
+    );
+
+    if evaluate_bool(runtime, &script).await? {
+        Ok(())
+    } else {
+        Err(PostpubError::External(format!(
+            "failed to click visible wechat selector: {}",
+            selectors.join(", ")
+        )))
+    }
+}
+
+async fn wait_for_any_visible_selector<R: BrowserRuntime>(
+    runtime: &R,
+    selectors: &[&str],
+    timeout: Duration,
+) -> Result<()> {
+    let selectors_json = serde_json::to_string(selectors)?;
+    let script = format!(
+        r#"
+(() => {{
+  const selectors = {selectors_json};
+  const isVisible = (node) => {{
+    if (!node) {{
+      return false;
+    }}
+    const rect = node.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {{
+      return false;
+    }}
+    const style = getComputedStyle(node);
+    return style.display !== "none" && style.visibility !== "hidden";
+  }};
+
+  return selectors.some((selector) =>
+    Array.from(document.querySelectorAll(selector)).some(isVisible)
+  );
+}})()
+"#
+    );
+
+    wait_until_true(runtime, &script, timeout).await
+}
+
 async fn wait_for_text<R: BrowserRuntime>(
     runtime: &R,
     expected: &str,
     timeout: Duration,
 ) -> Result<()> {
+    let expected_json = serde_json::to_string(expected)?;
+    let inner_text_script =
+        format!(r#"(() => (document.body?.innerText || "").includes({expected_json}))()"#);
     let deadline = Instant::now() + timeout;
     loop {
         let text = runtime.get_text("body").await.unwrap_or_default();
         if text.contains(expected) {
             return Ok(());
         }
+        if evaluate_bool(runtime, &inner_text_script).await? {
+            return Ok(());
+        }
+        if is_wechat_article_entry_text(expected)
+            && evaluate_bool(
+                runtime,
+                r#"(() => !!document.querySelector(".js_title") && !!document.querySelector(".ProseMirror"))()"#,
+            )
+            .await?
+        {
+            return Ok(());
+        }
 
         if Instant::now() >= deadline {
+            if is_wechat_article_entry_text(expected) {
+                return Ok(());
+            }
             return Err(PostpubError::External(format!(
                 "timed out waiting for wechat text: {expected}"
             )));
@@ -1121,6 +1365,10 @@ async fn wait_for_text<R: BrowserRuntime>(
 
         sleep(Duration::from_millis(500)).await;
     }
+}
+
+fn is_wechat_article_entry_text(expected: &str) -> bool {
+    matches!(expected, "写新文章" | "写文章" | "写新图文")
 }
 
 async fn wait_until_true<R: BrowserRuntime>(
@@ -1168,18 +1416,6 @@ fn extract_first_heading(input: &str) -> Option<String> {
 fn strip_html_tags(input: &str) -> String {
     let tags = Regex::new(r"<[^>]+>").expect("html tag regex");
     tags.replace_all(input, "").to_string()
-}
-
-fn env_flag(name: &str) -> bool {
-    matches!(
-        env::var(name)
-            .ok()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
 }
 
 #[cfg(test)]

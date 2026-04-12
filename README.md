@@ -3,6 +3,7 @@
 `postpub` 是新的主工程根目录。
 
 当前约束：
+
 - 所有新代码、文档、脚本都写在 `D:\work\github\postpub`
 - `AIWriteX/` 只作为只读参考源，不再写入任何新实现
 - 当前技术栈为 `Rust + Axum + Vue + TypeScript`
@@ -12,6 +13,7 @@
 ## 当前实现状态
 
 已实现：
+
 - Cargo workspace 与根目录工程结构
 - `postpub-types`、`postpub-core`、`postpub-api`
 - `apps/web-launcher`
@@ -24,6 +26,7 @@
 - 前端测试与后端测试
 
 暂缓：
+
 - 微信发布链路
 - 完整 Tauri 桌面宿主集成
 
@@ -69,6 +72,12 @@ npm install
 npm run build
 ```
 
+## browser agent 编译
+
+```
+cargo build -p postpub-agent-browser
+```
+
 ## Web 调试
 
 前端热更新联调方式：
@@ -94,6 +103,7 @@ http://127.0.0.1:5173
 ```
 
 说明：
+
 - Vite 开发服务器会将 `/api` 和 `/images` 代理到 `http://127.0.0.1:3000`
 - 默认代理目标可通过环境变量 `POSTPUB_DEV_PROXY_TARGET` 覆盖
 - 如果只想验证完整打包后的 Web 形态，继续使用 `cargo run -p postpub-web-launcher` 并访问 `http://127.0.0.1:3000`
@@ -101,6 +111,7 @@ http://127.0.0.1:5173
 ## 多语言
 
 前端目前只支持两种语言：
+
 - 中文 `zh-CN`
 - 英文 `en-US`
 

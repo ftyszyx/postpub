@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/postpub-types",
     "crates/postpub-core",
+    "crates/postpub-agent-browser",
     "crates/postpub-api",
     "apps/desktop",
     "apps/web-launcher",
