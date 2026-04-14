@@ -17,6 +17,9 @@ import { translate } from "../utils/i18n";
 const DEFAULT_THEME = "light";
 const DEFAULT_WINDOW_MODE = "STANDARD";
 const DEFAULT_DESIGN_THEME = "follow-system";
+export const LLM_MAX_TOKENS_LIMIT = 131072;
+const LLM_MIN_TOKENS_LIMIT = 1;
+const DEFAULT_LLM_MAX_TOKENS = 8192;
 
 let systemThemeMediaQuery: MediaQueryList | null = null;
 let systemThemeListenerBound = false;
@@ -86,6 +89,8 @@ const defaultWechatPublishTargetConfig = (
 ): WechatPublishTargetConfig => ({
   cover_strategy: "article_cover",
   cover_path: "",
+  cover_width: 900,
+  cover_height: 383,
   declare_original: false,
   enable_reward: false,
   enable_paid: false,
@@ -253,8 +258,17 @@ function normalizeCustomLlmProviders(providers?: CustomLlmProvider[] | null): Cu
       provider.protocol_type?.trim() === "custom"
         ? "openai_compatible"
         : provider.protocol_type?.trim() || "openai",
+    max_tokens: normalizeLlmMaxTokens(provider.max_tokens),
     enabled: provider.id === activeProvider.id
   }));
+}
+
+function normalizeLlmMaxTokens(value?: number | null): number {
+  const numeric =
+    typeof value === "number" && Number.isFinite(value)
+      ? Math.trunc(value)
+      : DEFAULT_LLM_MAX_TOKENS;
+  return Math.min(Math.max(numeric, LLM_MIN_TOKENS_LIMIT), LLM_MAX_TOKENS_LIMIT);
 }
 
 function normalizePostpubConfig(config: PostpubConfig): PostpubConfig {

@@ -109,6 +109,8 @@ export interface PublishTargetConfig {
 export interface WechatPublishTargetConfig {
   cover_strategy: string;
   cover_path: string;
+  cover_width: number;
+  cover_height: number;
   declare_original: boolean;
   enable_reward: boolean;
   enable_paid: boolean;

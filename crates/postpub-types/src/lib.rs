@@ -303,6 +303,10 @@ pub struct WechatPublishTargetConfig {
     pub cover_strategy: String,
     #[serde(default)]
     pub cover_path: String,
+    #[serde(default = "default_wechat_cover_width")]
+    pub cover_width: u32,
+    #[serde(default = "default_wechat_cover_height")]
+    pub cover_height: u32,
     #[serde(default)]
     pub declare_original: bool,
     #[serde(default)]
@@ -326,6 +330,8 @@ impl Default for WechatPublishTargetConfig {
         Self {
             cover_strategy: default_wechat_cover_strategy(),
             cover_path: String::new(),
+            cover_width: default_wechat_cover_width(),
+            cover_height: default_wechat_cover_height(),
             declare_original: false,
             enable_reward: false,
             enable_paid: false,
@@ -340,6 +346,14 @@ impl Default for WechatPublishTargetConfig {
 
 fn default_wechat_cover_strategy() -> String {
     "article_cover".to_string()
+}
+
+fn default_wechat_cover_width() -> u32 {
+    900
+}
+
+fn default_wechat_cover_height() -> u32 {
+    383
 }
 
 fn default_wechat_comment_mode() -> String {

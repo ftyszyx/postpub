@@ -24,7 +24,7 @@ import {
 } from "ant-design-vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
-import { useConfigStore } from "../stores/config";
+import { LLM_MAX_TOKENS_LIMIT, useConfigStore } from "../stores/config";
 import { useNavigationStore, type ConfigPanel } from "../stores/navigation";
 import { useTemplateStore } from "../stores/templates";
 import type {
@@ -288,6 +288,8 @@ function createPublishTargetDraft(
     wechat: {
       cover_strategy: "article_cover",
       cover_path: "",
+      cover_width: 900,
+      cover_height: 383,
       declare_original: false,
       enable_reward: false,
       enable_paid: false,
@@ -523,7 +525,13 @@ function closeLlmModal() {
 }
 
 async function saveLlmDraft() {
-  const draft = { ...llmDraft.value };
+  const draft = {
+    ...llmDraft.value,
+    max_tokens: Math.min(
+      Math.max(Math.trunc(llmDraft.value.max_tokens || 8192), 1),
+      LLM_MAX_TOKENS_LIMIT,
+    ),
+  };
   if (!draft.name.trim()) {
     draft.name = t("config.sections.customProviderFallbackName");
   }
@@ -1158,6 +1166,7 @@ watch(
           <AInputNumber
             v-model:value="llmDraft.max_tokens"
             :min="1"
+            :max="LLM_MAX_TOKENS_LIMIT"
             :precision="0"
             class="config-number-input"
           />
@@ -1309,6 +1318,24 @@ watch(
             :label="t('config.sections.wechatCoverPath')"
           >
             <AInput v-model:value="publishTargetDraft.wechat.cover_path" />
+          </AFormItem>
+
+          <AFormItem :label="t('config.sections.wechatCoverWidth')">
+            <AInputNumber
+              v-model:value="publishTargetDraft.wechat.cover_width"
+              :min="1"
+              :precision="0"
+              class="config-number-input"
+            />
+          </AFormItem>
+
+          <AFormItem :label="t('config.sections.wechatCoverHeight')">
+            <AInputNumber
+              v-model:value="publishTargetDraft.wechat.cover_height"
+              :min="1"
+              :precision="0"
+              class="config-number-input"
+            />
           </AFormItem>
 
           <AFormItem :label="t('config.sections.wechatCollectionId')">

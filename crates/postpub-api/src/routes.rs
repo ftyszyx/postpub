@@ -173,8 +173,9 @@ async fn save_config(
     store.save_config(&bundle.config)?;
     store.save_aiforge_config(&bundle.aiforge_config)?;
     store.save_ui_config(&bundle.ui_config)?;
+    let saved = store.load_bundle()?;
     Ok(Json(ApiResponse::with_message(
-        bundle,
+        saved,
         "configuration saved",
     )))
 }
@@ -199,10 +200,8 @@ async fn save_ui_config(
     Json(ui_config): Json<UiConfig>,
 ) -> Result<Json<ApiResponse<UiConfig>>, ApiError> {
     state.context.config_store().save_ui_config(&ui_config)?;
-    Ok(Json(ApiResponse::with_message(
-        ui_config,
-        "ui config saved",
-    )))
+    let saved = state.context.config_store().load_ui_config()?;
+    Ok(Json(ApiResponse::with_message(saved, "ui config saved")))
 }
 
 async fn list_template_categories(

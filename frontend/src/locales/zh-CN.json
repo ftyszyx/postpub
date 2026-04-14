@@ -208,6 +208,8 @@
       "wechatCoverStrategyPlatformAi": "使用公众号 AI 配图",
       "wechatCoverStrategyManual": "后续手动补充",
       "wechatCoverPath": "封面路径或素材引用",
+      "wechatCoverWidth": "封面宽度",
+      "wechatCoverHeight": "封面高度",
       "wechatCommentMode": "留言设置",
       "wechatCommentModeAutoSelectedOpen": "自动精选公开",
       "wechatCommentModeOpenAll": "全部开放",

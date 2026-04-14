@@ -4,6 +4,7 @@ mod browser;
 mod config;
 mod error;
 mod generation;
+mod llm;
 mod paths;
 mod publish;
 mod templates;

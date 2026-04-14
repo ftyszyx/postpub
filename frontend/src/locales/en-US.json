@@ -208,6 +208,8 @@
       "wechatCoverStrategyPlatformAi": "Use WeChat AI cover",
       "wechatCoverStrategyManual": "Fill manually later",
       "wechatCoverPath": "Cover path or asset reference",
+      "wechatCoverWidth": "Cover width",
+      "wechatCoverHeight": "Cover height",
       "wechatCommentMode": "Comment mode",
       "wechatCommentModeAutoSelectedOpen": "Auto-selected public",
       "wechatCommentModeOpenAll": "Open to all",

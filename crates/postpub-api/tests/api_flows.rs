@@ -150,6 +150,7 @@ async fn config_endpoints_roundtrip() {
         .wechat
         .declare_original = true;
     bundle.data.ui_config.custom_llm_providers[0].api_key = "llm-key".to_string();
+    bundle.data.ui_config.custom_llm_providers[0].max_tokens = 999_999;
 
     let (status, saved): (StatusCode, ApiResponse<ConfigBundle>) = json_response(
         &app,
@@ -180,6 +181,10 @@ async fn config_endpoints_roundtrip() {
     assert_eq!(
         saved.data.ui_config.custom_llm_providers[0].api_key,
         bundle.data.ui_config.custom_llm_providers[0].api_key
+    );
+    assert_eq!(
+        saved.data.ui_config.custom_llm_providers[0].max_tokens,
+        131_072
     );
 }
 
@@ -498,6 +503,69 @@ async fn generation_task_fails_when_llm_api_key_is_missing() {
         .as_deref()
         .unwrap_or_default()
         .contains("fill api_key"));
+}
+
+#[tokio::test]
+async fn generation_task_surfaces_detailed_llm_error_messages() {
+    let (app, context, _temp) = test_app();
+
+    let llm_app = Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|| async {
+            (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({
+                    "error": {
+                        "code": "InvalidParameter",
+                        "message": "The parameter `max_tokens` specified in the request are not valid.",
+                        "param": "max_tokens",
+                        "type": "BadRequest"
+                    }
+                })),
+            )
+        }),
+    );
+    let llm_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind llm listener");
+    let llm_addr = llm_listener.local_addr().expect("llm addr");
+    let llm_server = tokio::spawn(async move {
+        axum::serve(llm_listener, llm_app).await.expect("serve llm");
+    });
+
+    configure_mock_llm(&context, format!("http://{llm_addr}/v1"));
+
+    let request = GenerateArticleRequest {
+        topic: "vicoding".to_string(),
+        reference_urls: vec![],
+        template_category: Some("general".to_string()),
+        template_name: Some("magazine".to_string()),
+        save_output: false,
+    };
+
+    let (status, created): (StatusCode, ApiResponse<GenerationTaskSummary>) = json_response(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/generation/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&request).expect("serialize request"),
+            ))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let task = wait_for_task_completion(&app, &created.data.id).await;
+    llm_server.abort();
+
+    assert_eq!(task.status, GenerationTaskStatus::Failed);
+    assert!(task
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("The parameter `max_tokens` specified in the request are not valid."));
 }
 
 #[tokio::test]

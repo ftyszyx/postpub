@@ -12,6 +12,7 @@ use crate::{
     aiforge::AiforgeEngine,
     articles::{markdown_to_html, preview_html, ArticleStore},
     error::{PostpubError, Result},
+    llm::{normalize_llm_max_tokens, LLM_MAX_TOKENS_MAX},
     templates::TemplateStore,
     AppContext,
 };
@@ -328,6 +329,7 @@ async fn execute_chat_completion(
     user_prompt: &str,
 ) -> Result<String> {
     let endpoint = chat_completions_endpoint(&provider.api_base, &provider.protocol_type)?;
+    let max_tokens = validate_provider_max_tokens(provider)?;
     let response = client
         .post(endpoint)
         .bearer_auth(api_key)
@@ -343,17 +345,76 @@ async fn execute_chat_completion(
                     "content": user_prompt,
                 }
             ],
-            "max_tokens": provider.max_tokens,
+            "max_tokens": max_tokens,
             "stream": false
         }))
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+
+    let response = map_chat_completion_error(response, provider).await?;
 
     let payload = response.json::<ChatCompletionsResponse>().await?;
     payload.first_text().ok_or_else(|| {
         PostpubError::External("llm response did not contain a text message".to_string())
     })
+}
+
+fn validate_provider_max_tokens(provider: &CustomLlmProvider) -> Result<usize> {
+    let normalized = normalize_llm_max_tokens(provider.max_tokens);
+    if normalized != provider.max_tokens {
+        return Err(PostpubError::Validation(format!(
+            "LLM provider '{}' max_tokens={} is out of range; supported range is 1-{}",
+            provider_display_name(provider),
+            provider.max_tokens,
+            LLM_MAX_TOKENS_MAX
+        )));
+    }
+
+    Ok(normalized)
+}
+
+async fn map_chat_completion_error(
+    response: reqwest::Response,
+    provider: &CustomLlmProvider,
+) -> Result<reqwest::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let detail = parse_chat_completion_error_detail(&body);
+    let provider_name = provider_display_name(provider);
+
+    let message = if detail.is_empty() {
+        format!(
+            "LLM provider '{}' request failed with HTTP {}",
+            provider_name, status
+        )
+    } else {
+        format!(
+            "LLM provider '{}' request failed with HTTP {}: {}",
+            provider_name, status, detail
+        )
+    };
+
+    Err(PostpubError::External(message))
+}
+
+fn parse_chat_completion_error_detail(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Ok(payload) = serde_json::from_str::<ChatCompletionErrorEnvelope>(trimmed) {
+        let message = payload.error.message.trim();
+        if !message.is_empty() {
+            return message.to_string();
+        }
+    }
+
+    trimmed.to_string()
 }
 
 fn build_title(request: &GenerateArticleRequest) -> String {
@@ -748,6 +809,17 @@ struct ChatCompletionsResponse {
     choices: Vec<ChatChoice>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ChatCompletionErrorEnvelope {
+    error: ChatCompletionErrorBody,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatCompletionErrorBody {
+    #[serde(default)]
+    message: String,
+}
+
 impl ChatCompletionsResponse {
     fn first_text(&self) -> Option<String> {
         self.choices
@@ -823,7 +895,8 @@ mod tests {
     use super::{
         build_design_user_prompt, build_template_user_prompt, chat_completions_endpoint,
         format_sources_for_prompt, normalize_llm_html, normalize_llm_markdown,
-        resolve_provider_api_key, select_generation_provider, strip_code_fences,
+        parse_chat_completion_error_detail, resolve_provider_api_key, select_generation_provider,
+        strip_code_fences, validate_provider_max_tokens,
     };
 
     #[test]
@@ -972,6 +1045,31 @@ mod tests {
 
         let error = resolve_provider_api_key(&provider).expect_err("missing api key");
         assert!(error.to_string().contains("fill api_key"));
+    }
+
+    #[test]
+    fn rejects_out_of_range_provider_max_tokens() {
+        let provider = CustomLlmProvider {
+            name: "Ark".to_string(),
+            max_tokens: 999_999,
+            ..CustomLlmProvider::default()
+        };
+
+        let error = validate_provider_max_tokens(&provider).expect_err("out of range");
+        assert!(error.to_string().contains("max_tokens=999999"));
+        assert!(error.to_string().contains("131072"));
+    }
+
+    #[test]
+    fn extracts_llm_error_message_from_json_body() {
+        let message = parse_chat_completion_error_detail(
+            r#"{"error":{"code":"InvalidParameter","message":"The parameter `max_tokens` specified in the request are not valid.","param":"max_tokens","type":"BadRequest"}}"#,
+        );
+
+        assert_eq!(
+            message,
+            "The parameter `max_tokens` specified in the request are not valid."
+        );
     }
 
     #[test]

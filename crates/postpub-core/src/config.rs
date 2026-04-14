@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf};
 
 use postpub_types::{AiforgeConfig, ConfigBundle, PostpubConfig, UiConfig};
 
-use crate::{error::Result, paths::AppPaths, text::repair_mojibake};
+use crate::{error::Result, llm::repair_llm_provider, paths::AppPaths, text::repair_mojibake};
 
 #[derive(Debug, Clone)]
 pub struct ConfigStore {
@@ -89,9 +89,11 @@ impl ConfigStore {
     }
 
     pub fn save_ui_config(&self, config: &UiConfig) -> Result<()> {
+        let mut normalized = config.clone();
+        repair_ui_config(&mut normalized);
         fs::write(
             self.paths.ui_config_file(),
-            serde_json::to_string_pretty(config)?,
+            serde_json::to_string_pretty(&normalized)?,
         )?;
         Ok(())
     }
@@ -135,6 +137,7 @@ fn repair_ui_config(ui_config: &mut UiConfig) -> bool {
 
     for provider in &mut ui_config.custom_llm_providers {
         changed |= repair_string(&mut provider.name);
+        changed |= repair_llm_provider(provider);
     }
 
     changed
@@ -200,6 +203,30 @@ mod tests {
         let persisted = fs::read_to_string(config_file).expect("read repaired file");
         assert!(persisted.contains("阿里万相"));
         assert!(persisted.contains("微信公众号 1"));
+    }
+
+    #[test]
+    fn clamps_llm_max_tokens_when_loading_ui_config() {
+        let temp = tempdir().expect("temp dir");
+        let store = ConfigStore::new(AppPaths::from_root(temp.path().to_path_buf()));
+
+        store.ensure_defaults().expect("bootstrap defaults");
+
+        let mut ui_config = store.load_ui_config().expect("load defaults");
+        ui_config.custom_llm_providers[0].max_tokens = 999_999;
+
+        let ui_config_file = AppPaths::from_root(temp.path().to_path_buf()).ui_config_file();
+        fs::write(
+            &ui_config_file,
+            serde_json::to_string_pretty(&ui_config).expect("serialize ui config"),
+        )
+        .expect("write ui config");
+
+        let loaded = store.load_ui_config().expect("load normalized ui config");
+        assert_eq!(loaded.custom_llm_providers[0].max_tokens, 131_072);
+
+        let persisted = fs::read_to_string(ui_config_file).expect("read normalized ui config");
+        assert!(persisted.contains("\"max_tokens\": 131072"));
     }
 
     fn latin1_mojibake(value: &str) -> String {

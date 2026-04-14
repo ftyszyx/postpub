@@ -31,15 +31,27 @@ enum WechatCoverPlan {
     PlatformAi,
 }
 
-impl WechatCoverPlan {
-    fn code(&self) -> &'static str {
-        match self {
-            Self::Upload(_) => "upload",
-            Self::BodyFirstImage => "body_first_image",
-            Self::PlatformAi => "platform_ai",
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+struct WechatCoverSize {
+    width: u32,
+    height: u32,
+}
 
+#[derive(Debug, Clone)]
+struct WechatCoverRequest {
+    plan: WechatCoverPlan,
+    size: WechatCoverSize,
+}
+
+#[derive(Debug, Clone)]
+struct WechatPublishPlan {
+    title: String,
+    body_html: String,
+    format: String,
+    cover: WechatCoverRequest,
+}
+
+impl WechatCoverPlan {
     fn description(&self) -> &'static str {
         match self {
             Self::Upload(_) => "本地文件上传",
@@ -58,10 +70,7 @@ impl WechatPublisher {
         &self,
         runtime: &R,
         target: &PublishTargetConfig,
-        article: &ArticleDocument,
-        variant: &ArticleVariantDocument,
-        body_html: &str,
-        cover_plans: &[WechatCoverPlan],
+        plan: &WechatPublishPlan,
         request: &PublishArticleRequest,
         reporter: &PublishProgressReporter,
     ) -> Result<PublishOutput> {
@@ -71,7 +80,6 @@ impl WechatPublisher {
             ));
         }
 
-        let title = article_title(article, variant);
         let origin = wechat_origin(&target.publish_url)?;
 
         reporter.report("wechat.browser", "starting agent-browser session");
@@ -82,7 +90,7 @@ impl WechatPublisher {
         let current_url = runtime.get_url().await?;
         reporter.report("wechat.auth.url", format!("current page {current_url}"));
         let Some(token) = extract_query_value(&current_url, "token") else {
-            let body_text = runtime.get_text("body").await.unwrap_or_default();
+            let body_text = runtime.get_text("body").await?;
             if body_text.contains("使用账号登录") || body_text.contains("登录") {
                 return Err(PostpubError::External(format!(
                     "wechat login is required. Please log in once with the browser profile for target '{}'",
@@ -94,33 +102,10 @@ impl WechatPublisher {
             )));
         };
 
-        let editor_opened_directly =
-            try_open_wechat_editor_direct(runtime, &origin, &token, reporter).await?;
-        if !editor_opened_directly {
-            let draft_url = format!(
-                "{origin}/cgi-bin/appmsg?begin=0&count=10&type=77&action=list_card&token={token}&lang=zh_CN"
-            );
-            reporter.report("wechat.navigate", "opening draft box");
-            reporter.report("wechat.navigate.open", "opening draft list page");
-            navigate_with_recovery(runtime, &draft_url, reporter, "wechat.navigate").await?;
-            reporter.report("wechat.navigate.opened", "draft list page opened");
-            wait_for_text(runtime, "新的创作", Duration::from_secs(15)).await?;
-            reporter.report("wechat.navigate.ready", "draft list page is ready");
-
-            reporter.report("wechat.editor", "opening new article editor");
-            click_by_text(runtime, "新的创作", true).await?;
-            wait_for_text(runtime, "写新文章", Duration::from_secs(10)).await?;
-            click_by_text(runtime, "写新文章", true).await?;
-            wait_until_true(
-                runtime,
-                r#"(() => !!document.querySelector(".js_title") && !!document.querySelector(".ProseMirror"))()"#,
-                Duration::from_secs(15),
-            )
-            .await?;
-        }
+        open_wechat_editor(runtime, &origin, &token, reporter).await?;
 
         reporter.report("wechat.title", "填写文章标题");
-        runtime.fill(".js_title", &title).await?;
+        runtime.fill(".js_title", &plan.title).await?;
 
         if !target.account_name.trim().is_empty() {
             reporter.report("wechat.author", "填写作者信息");
@@ -130,7 +115,7 @@ impl WechatPublisher {
         }
 
         reporter.report("wechat.body", "写入文章正文");
-        set_editor_html(runtime, body_html).await?;
+        set_editor_html(runtime, &plan.body_html).await?;
         wait_until_true(
             runtime,
             r#"(() => {
@@ -161,7 +146,7 @@ impl WechatPublisher {
         )
         .await?;
 
-        apply_wechat_cover(runtime, cover_plans, reporter).await?;
+        apply_wechat_cover(runtime, &plan.cover, reporter).await?;
 
         apply_wechat_publish_settings(runtime, target, reporter).await?;
 
@@ -169,20 +154,20 @@ impl WechatPublisher {
         click_by_text(runtime, "保存为草稿", true).await?;
         wait_for_text(runtime, "手动保存", Duration::from_secs(20)).await?;
 
-        let remote_url = runtime.get_url().await.ok();
+        let remote_url = Some(runtime.get_url().await?);
         let remote_id = remote_url
             .as_deref()
             .and_then(|url| extract_query_value(url, "appmsgid"));
 
         reporter.report("wechat.done", "微信公众号草稿保存完成");
         Ok(PublishOutput {
-            article_relative_path: article.summary.relative_path.clone(),
-            article_title: title,
+            article_relative_path: request.article_relative_path.clone(),
+            article_title: plan.title.clone(),
             target_id: target.id.clone(),
             target_name: target.name.clone(),
             platform_type: target.platform_type.clone(),
             mode: request.mode.clone(),
-            format: variant.summary.format.clone(),
+            format: plan.format.clone(),
             remote_id,
             remote_url,
         })
@@ -215,9 +200,7 @@ impl Publisher for WechatPublisher {
             ),
         );
 
-        let body_html = article_body_html(article, variant);
-        let cover_plans = resolve_wechat_cover_plans(&self.context, target, article, &body_html)?;
-        validate_wechat_supported_settings(target)?;
+        let plan = build_wechat_publish_plan(&self.context, target, article, variant)?;
 
         reporter.report("wechat.browser.prepare", "检查内置浏览器版本");
         let browser_executable = self
@@ -263,17 +246,15 @@ impl Publisher for WechatPublisher {
             .publish_with_runtime(
                 &runtime,
                 target,
-                article,
-                variant,
-                &body_html,
-                &cover_plans,
+                &plan,
                 request,
                 reporter,
             )
             .await;
 
         reporter.report("wechat.browser.close", "closing agent-browser session");
-        match runtime.close().await {
+        let close_result = runtime.close().await;
+        match &close_result {
             Ok(()) => reporter.report("wechat.browser.closed", "agent-browser session closed"),
             Err(error) => reporter.report(
                 "wechat.browser.close_error",
@@ -281,7 +262,11 @@ impl Publisher for WechatPublisher {
             ),
         }
 
-        publish_result
+        match (publish_result, close_result) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(output), Ok(())) => Ok(output),
+        }
     }
 }
 
@@ -304,6 +289,26 @@ fn article_body_html(article: &ArticleDocument, variant: &ArticleVariantDocument
     } else {
         preview
     }
+}
+
+fn build_wechat_publish_plan(
+    context: &AppContext,
+    target: &PublishTargetConfig,
+    article: &ArticleDocument,
+    variant: &ArticleVariantDocument,
+) -> Result<WechatPublishPlan> {
+    validate_wechat_supported_settings(target)?;
+
+    let title = article_title(article, variant);
+    let body_html = article_body_html(article, variant);
+    let cover = resolve_wechat_cover_request(context, target, article, &body_html)?;
+
+    Ok(WechatPublishPlan {
+        title,
+        body_html,
+        format: variant.summary.format.clone(),
+        cover,
+    })
 }
 
 fn resolve_wechat_session_name(target: &PublishTargetConfig) -> String {
@@ -676,44 +681,26 @@ fn extract_query_value(url: &str, key: &str) -> Option<String> {
         .map(|(_, value)| value.to_string())
 }
 
-fn resolve_wechat_cover_plans(
+fn resolve_wechat_cover_request(
     context: &AppContext,
     target: &PublishTargetConfig,
     article: &ArticleDocument,
     body_html: &str,
-) -> Result<Vec<WechatCoverPlan>> {
-    let strategy = target.wechat.cover_strategy.trim();
-    let mut plans = Vec::new();
+) -> Result<WechatCoverRequest> {
+    let size = resolve_wechat_cover_size(target)?;
     let body_has_image = html_contains_image(body_html);
 
-    match strategy {
-        "custom_path" => {
-            plans.push(WechatCoverPlan::Upload(resolve_wechat_cover_path(
-                context, target, article,
-            )?));
-            if body_has_image {
-                plans.push(WechatCoverPlan::BodyFirstImage);
-            }
-            plans.push(WechatCoverPlan::PlatformAi);
-        }
-        "article_cover" => {
-            if let Some(path) = resolve_wechat_article_cover_upload_path(context, target, article) {
-                plans.push(WechatCoverPlan::Upload(path));
-            }
-            if body_has_image {
-                plans.push(WechatCoverPlan::BodyFirstImage);
-            }
-            plans.push(WechatCoverPlan::PlatformAi);
-        }
+    let plan = match target.wechat.cover_strategy.trim() {
+        "custom_path" => WechatCoverPlan::Upload(resolve_wechat_cover_path(context, target, article)?),
+        "article_cover" => WechatCoverPlan::Upload(resolve_wechat_cover_path(context, target, article)?),
+        "first_image" if body_has_image => WechatCoverPlan::BodyFirstImage,
         "first_image" => {
-            if body_has_image {
-                plans.push(WechatCoverPlan::BodyFirstImage);
-            }
-            plans.push(WechatCoverPlan::PlatformAi);
+            return Err(PostpubError::Validation(
+                "wechat cover strategy 'first_image' requires at least one image in the article body"
+                    .to_string(),
+            ));
         }
-        "platform_ai" => {
-            plans.push(WechatCoverPlan::PlatformAi);
-        }
+        "platform_ai" => WechatCoverPlan::PlatformAi,
         "manual" => {
             return Err(PostpubError::Validation(
                 "wechat cover strategy 'manual' is not supported in automated publish yet"
@@ -725,15 +712,22 @@ fn resolve_wechat_cover_plans(
                 "unsupported wechat cover strategy: {other}"
             )));
         }
+    };
+
+    Ok(WechatCoverRequest { plan, size })
+}
+
+fn resolve_wechat_cover_size(target: &PublishTargetConfig) -> Result<WechatCoverSize> {
+    let width = target.wechat.cover_width;
+    let height = target.wechat.cover_height;
+    if width == 0 || height == 0 {
+        return Err(PostpubError::Validation(format!(
+            "invalid wechat cover size {}x{}",
+            width, height
+        )));
     }
 
-    if plans.is_empty() {
-        return Err(PostpubError::Validation(
-            "wechat cover could not be resolved. Provide a local cover, include an image in the article body, or switch to the platform AI strategy".to_string(),
-        ));
-    }
-
-    Ok(plans)
+    Ok(WechatCoverSize { width, height })
 }
 
 fn resolve_wechat_cover_path(
@@ -757,15 +751,6 @@ fn resolve_wechat_cover_path(
 
     resolve_local_cover_path(context, article, &raw_path)
         .ok_or_else(|| PostpubError::NotFound(format!("wechat cover file not found: {raw_path}")))
-}
-
-fn resolve_wechat_article_cover_upload_path(
-    context: &AppContext,
-    target: &PublishTargetConfig,
-    article: &ArticleDocument,
-) -> Option<PathBuf> {
-    let raw_path = resolve_wechat_cover_source(context, target, article)?;
-    resolve_local_cover_path(context, article, &raw_path)
 }
 
 fn resolve_wechat_cover_source(
@@ -851,37 +836,20 @@ fn validate_wechat_supported_settings(target: &PublishTargetConfig) -> Result<()
     Ok(())
 }
 
-async fn try_open_wechat_editor_direct<R: BrowserRuntime>(
+async fn open_wechat_editor<R: BrowserRuntime>(
     runtime: &R,
     origin: &str,
     token: &str,
     reporter: &PublishProgressReporter,
-) -> Result<bool> {
+) -> Result<()> {
     let editor_url = format!(
         "{origin}/cgi-bin/appmsg?t=media/appmsg_edit_v2&action=edit&isNew=1&type=77&token={token}"
     );
     reporter.report("wechat.editor.direct", "opening direct editor url");
-    navigate_with_recovery(runtime, &editor_url, reporter, "wechat.editor.direct").await?;
-
-    match wait_until_true(
-        runtime,
-        r#"(() => !!document.querySelector(".js_title") && !!document.querySelector(".ProseMirror"))()"#,
-        Duration::from_secs(15),
-    )
-    .await
-    {
-        Ok(()) => {
-            reporter.report("wechat.editor.ready", "direct editor page is ready");
-            Ok(true)
-        }
-        Err(_) => {
-            reporter.report(
-                "wechat.editor.direct_fallback",
-                "direct editor url did not become ready, falling back to draft box flow",
-            );
-            Ok(false)
-        }
-    }
+    navigate_to_url(runtime, &editor_url).await?;
+    wait_for_editor_ready(runtime, Duration::from_secs(15)).await?;
+    reporter.report("wechat.editor.ready", "direct editor page is ready");
+    Ok(())
 }
 
 async fn open_wechat_dashboard<R: BrowserRuntime>(
@@ -889,7 +857,7 @@ async fn open_wechat_dashboard<R: BrowserRuntime>(
     url: &str,
     reporter: &PublishProgressReporter,
 ) -> Result<()> {
-    open_with_recovery(runtime, url, reporter, "wechat.browser", Some(5_000)).await?;
+    open_url(runtime, url, 5_000).await?;
     reporter.report("wechat.browser.opened", "wechat dashboard opened");
     reporter.report(
         "wechat.browser.wait",
@@ -921,7 +889,7 @@ async fn apply_wechat_publish_settings<R: BrowserRuntime>(
         open_wechat_setting(runtime, "原创").await?;
         runtime.wait_ms(500).await?;
         click_any_text(runtime, &["声明原创", "原创"], true).await?;
-        click_optional_text(runtime, &["确定", "确认", "保存"], true).await?;
+        click_any_text(runtime, &["确定", "确认", "保存"], true).await?;
         runtime.wait_ms(500).await?;
     }
 
@@ -939,7 +907,7 @@ async fn apply_wechat_publish_settings<R: BrowserRuntime>(
             }
         };
         click_any_text(runtime, &[option_text], true).await?;
-        click_optional_text(runtime, &["确定", "确认", "保存"], true).await?;
+        click_any_text(runtime, &["确定", "确认", "保存"], true).await?;
         runtime.wait_ms(500).await?;
     }
 
@@ -974,64 +942,46 @@ async fn apply_wechat_publish_settings<R: BrowserRuntime>(
 
 async fn apply_wechat_cover<R: BrowserRuntime>(
     runtime: &R,
-    plans: &[WechatCoverPlan],
+    cover: &WechatCoverRequest,
     reporter: &PublishProgressReporter,
 ) -> Result<()> {
-    let mut failures = Vec::new();
-
-    for (index, plan) in plans.iter().enumerate() {
-        reporter.report(
-            "wechat.cover.method",
-            match plan {
-                WechatCoverPlan::Upload(path) => {
-                    format!("尝试通过{}设置封面：{}", plan.description(), path.display())
-                }
-                _ => format!("尝试通过{}设置封面", plan.description()),
-            },
-        );
-
-        match try_apply_wechat_cover_plan(runtime, plan).await {
-            Ok(()) => {
-                reporter.report(
-                    "wechat.cover.ready",
-                    format!("封面已通过{}设置完成", plan.description()),
-                );
-                return Ok(());
+    reporter.report(
+        "wechat.cover.size",
+        format!(
+            "targeting wechat cover size {}x{}",
+            cover.size.width, cover.size.height
+        ),
+    );
+    reporter.report(
+        "wechat.cover.method",
+        match &cover.plan {
+            WechatCoverPlan::Upload(path) => {
+                format!(
+                    "通过{}设置封面：{}",
+                    cover.plan.description(),
+                    path.display()
+                )
             }
-            Err(error) => {
-                let detail = error.to_string();
-                failures.push(format!("{}: {detail}", plan.code()));
-                reporter.report(
-                    "wechat.cover.retry",
-                    format!("{}失败，准备尝试下一个方案：{detail}", plan.description()),
-                );
+            _ => format!("通过{}设置封面", cover.plan.description()),
+        },
+    );
 
-                if index + 1 < plans.len() {
-                    let _ = recover_wechat_cover_dialog(runtime).await;
-                }
-            }
-        }
-    }
-
-    Err(PostpubError::External(format!(
-        "failed to prepare wechat cover after trying all available strategies: {}",
-        failures.join(" | ")
-    )))
-}
-
-async fn try_apply_wechat_cover_plan<R: BrowserRuntime>(
-    runtime: &R,
-    plan: &WechatCoverPlan,
-) -> Result<()> {
     ensure_wechat_cover_picker_open(runtime).await?;
 
-    match plan {
+    match &cover.plan {
         WechatCoverPlan::Upload(path) => upload_wechat_cover_file(runtime, path).await?,
-        WechatCoverPlan::BodyFirstImage => select_wechat_cover_from_article(runtime).await?,
-        WechatCoverPlan::PlatformAi => select_wechat_cover_with_ai(runtime).await?,
+        WechatCoverPlan::BodyFirstImage => {
+            select_wechat_cover_from_article(runtime, cover.size).await?
+        }
+        WechatCoverPlan::PlatformAi => select_wechat_cover_with_ai(runtime, cover.size).await?,
     }
 
-    finalize_wechat_cover_selection(runtime).await
+    wait_for_wechat_cover_preview(runtime, Duration::from_secs(20)).await?;
+    reporter.report(
+        "wechat.cover.ready",
+        format!("封面已通过{}设置完成", cover.plan.description()),
+    );
+    Ok(())
 }
 
 async fn click_by_text<R: BrowserRuntime>(runtime: &R, text: &str, exact: bool) -> Result<()> {
@@ -1041,10 +991,6 @@ async fn click_by_text<R: BrowserRuntime>(runtime: &R, text: &str, exact: bool) 
 (() => {{
   const expected = {matcher};
   const exact = {exact};
-  const aliases =
-    ["写新文章", "写文章", "写新图文"].includes(expected)
-      ? ["写新文章", "写文章", "写新图文"]
-      : [expected];
   const normalize = (input) => (input || "").replace(/\s+/g, " ").trim();
   const isVisible = (node) => {{
     if (!node) {{
@@ -1078,7 +1024,7 @@ async fn click_by_text<R: BrowserRuntime>(runtime: &R, text: &str, exact: bool) 
         return false;
       }}
       const value = normalize(node.innerText || node.textContent || "");
-      return aliases.some((alias) => exact ? value === alias : value.includes(alias));
+      return exact ? value === expected : value.includes(expected);
     }})
     .map((node) => {{
       const target =
@@ -1104,10 +1050,6 @@ async fn click_by_text<R: BrowserRuntime>(runtime: &R, text: &str, exact: bool) 
       return left.rank - right.rank || left.value.length - right.value.length || right.area - left.area;
     }})[0];
   if (!candidate) {{
-    const editorReady = !!document.querySelector(".js_title") && !!document.querySelector(".ProseMirror");
-    if (editorReady && ["写新文章", "写文章", "写新图文"].includes(expected)) {{
-      return true;
-    }}
     return false;
   }}
   const target = candidate.target;
@@ -1139,96 +1081,25 @@ async fn click_any_text<R: BrowserRuntime>(
     candidates: &[&str],
     exact: bool,
 ) -> Result<()> {
+    let mut failures = Vec::new();
     for candidate in candidates {
-        if click_by_text(runtime, candidate, exact).await.is_ok() {
-            return Ok(());
+        match click_by_text(runtime, candidate, exact).await {
+            Ok(()) => return Ok(()),
+            Err(error) => failures.push(format!("{candidate}: {error}")),
         }
     }
 
     Err(PostpubError::External(format!(
         "failed to click any wechat text target: {}",
-        candidates.join(", ")
+        failures.join(" | ")
     )))
 }
 
-async fn click_optional_text<R: BrowserRuntime>(
-    runtime: &R,
-    candidates: &[&str],
-    exact: bool,
-) -> Result<bool> {
-    for candidate in candidates {
-        if click_by_text(runtime, candidate, exact).await.is_ok() {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+async fn open_url<R: BrowserRuntime>(runtime: &R, url: &str, timeout_ms: u64) -> Result<()> {
+    runtime.open_with_timeout_ms(url, timeout_ms).await
 }
 
-async fn open_with_recovery<R: BrowserRuntime>(
-    runtime: &R,
-    url: &str,
-    reporter: &PublishProgressReporter,
-    stage_prefix: &str,
-    open_timeout_ms: Option<u64>,
-) -> Result<()> {
-    let open_result = match open_timeout_ms {
-        Some(timeout_ms) => runtime.open_with_timeout_ms(url, timeout_ms).await,
-        None => runtime.open(url).await,
-    };
-
-    match open_result {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let message = error.to_string();
-            if !is_recoverable_open_error(&message) {
-                return Err(error);
-            }
-
-            reporter.report(
-                format!("{stage_prefix}.timeout"),
-                "page open is taking longer than expected, trying to recover the session",
-            );
-            let recovery_window = if open_timeout_ms.is_some() {
-                Duration::from_secs(20)
-            } else {
-                Duration::from_secs(45)
-            };
-            let recovery_deadline = Instant::now() + recovery_window;
-            let current_url = loop {
-                let _ = runtime.wait_ms(2000).await;
-                let last_error = match runtime.get_url().await {
-                    Ok(url) if !url.trim().is_empty() => break url,
-                    Ok(_) => "browser url is empty".to_string(),
-                    Err(retry_error) => retry_error.to_string(),
-                };
-
-                if Instant::now() >= recovery_deadline {
-                    return Err(PostpubError::External(format!(
-                        "browser session did not become ready after open timeout: {}",
-                        if last_error.is_empty() {
-                            message.clone()
-                        } else {
-                            last_error
-                        }
-                    )));
-                }
-            };
-            reporter.report(
-                format!("{stage_prefix}.recovered"),
-                format!("connected to page {current_url}"),
-            );
-            Ok(())
-        }
-    }
-}
-
-async fn navigate_with_recovery<R: BrowserRuntime>(
-    runtime: &R,
-    url: &str,
-    reporter: &PublishProgressReporter,
-    stage_prefix: &str,
-) -> Result<()> {
+async fn navigate_to_url<R: BrowserRuntime>(runtime: &R, url: &str) -> Result<()> {
     let url_json = serde_json::to_string(url)?;
     let script = format!(
         r#"
@@ -1239,24 +1110,7 @@ async fn navigate_with_recovery<R: BrowserRuntime>(
 "#
     );
 
-    match runtime.evaluate(&script).await {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            reporter.report(
-                format!("{stage_prefix}.navigate_fallback"),
-                "in-page navigation failed, falling back to browser open",
-            );
-            open_with_recovery(runtime, url, reporter, stage_prefix, None)
-                .await
-                .map_err(|_| error)
-        }
-    }
-}
-
-fn is_recoverable_open_error(message: &str) -> bool {
-    message.contains("agent-browser command timed out after")
-        || message.contains("Timeout waiting for Page.loadEventFired")
-        || message.contains("Timeout waiting for Page.domContentEventFired")
+    runtime.evaluate(&script).await.map(|_| ())
 }
 
 async fn open_wechat_setting<R: BrowserRuntime>(runtime: &R, label: &str) -> Result<()> {
@@ -1539,8 +1393,7 @@ async fn ensure_wechat_cover_picker_open<R: BrowserRuntime>(runtime: &R) -> Resu
             ".weui-desktop-popover",
         ],
     )
-    .await
-    .unwrap_or(false)
+    .await?
     {
         return Ok(());
     }
@@ -1571,7 +1424,10 @@ async fn upload_wechat_cover_file<R: BrowserRuntime>(runtime: &R, cover_path: &P
     wait_for_text(runtime, &file_name, Duration::from_secs(20)).await
 }
 
-async fn select_wechat_cover_from_article<R: BrowserRuntime>(runtime: &R) -> Result<()> {
+async fn select_wechat_cover_from_article<R: BrowserRuntime>(
+    runtime: &R,
+    _cover_size: WechatCoverSize,
+) -> Result<()> {
     click_any_text(
         runtime,
         &["从正文选择", "正文图片", "正文", "从正文选取"],
@@ -1582,9 +1438,12 @@ async fn select_wechat_cover_from_article<R: BrowserRuntime>(runtime: &R) -> Res
     click_first_wechat_cover_candidate(runtime).await
 }
 
-async fn select_wechat_cover_with_ai<R: BrowserRuntime>(runtime: &R) -> Result<()> {
+async fn select_wechat_cover_with_ai<R: BrowserRuntime>(
+    runtime: &R,
+    _cover_size: WechatCoverSize,
+) -> Result<()> {
     click_any_text(runtime, &["AI配图", "AI 配图", "智能配图"], false).await?;
-    let _ = click_optional_text(
+    click_any_text(
         runtime,
         &["生成封面", "开始生成", "立即生成", "生成配图", "生成"],
         false,
@@ -1705,22 +1564,6 @@ async fn click_first_wechat_cover_candidate<R: BrowserRuntime>(runtime: &R) -> R
     }
 }
 
-async fn finalize_wechat_cover_selection<R: BrowserRuntime>(runtime: &R) -> Result<()> {
-    if wait_for_wechat_cover_preview(runtime, Duration::from_secs(2))
-        .await
-        .is_ok()
-    {
-        return Ok(());
-    }
-
-    if click_optional_text(runtime, &["下一步"], true).await? {
-        let _ = wait_for_text(runtime, "编辑封面", Duration::from_secs(10)).await;
-    }
-
-    let _ = click_optional_text(runtime, &["确定", "确认", "完成", "使用"], true).await?;
-    wait_for_wechat_cover_preview(runtime, Duration::from_secs(20)).await
-}
-
 async fn wait_for_wechat_cover_preview<R: BrowserRuntime>(
     runtime: &R,
     timeout: Duration,
@@ -1734,21 +1577,6 @@ async fn wait_for_wechat_cover_preview<R: BrowserRuntime>(
         timeout,
     )
     .await
-}
-
-async fn recover_wechat_cover_dialog<R: BrowserRuntime>(runtime: &R) -> Result<()> {
-    let _ = click_optional_text(runtime, &["取消", "关闭", "返回"], true).await?;
-    let _ = click_first_visible_selector(
-        runtime,
-        &[
-            ".weui-desktop-dialog__close",
-            ".weui-desktop-icon-btn__close",
-            ".weui-desktop-dialog [class*='close']",
-        ],
-    )
-    .await;
-    let _ = runtime.wait_ms(300).await;
-    Ok(())
 }
 
 async fn wait_for_wechat_dashboard_state<R: BrowserRuntime>(
@@ -1782,23 +1610,14 @@ async fn wait_for_wechat_dashboard_state<R: BrowserRuntime>(
     let mut last_url = String::new();
 
     loop {
-        if let Ok(current_url) = runtime.get_url().await {
-            if !current_url.trim().is_empty() {
-                last_url = current_url.clone();
-            }
-
-            if looks_like_wechat_url(&current_url)
-                && evaluate_bool(runtime, dashboard_ready_script)
-                    .await
-                    .unwrap_or(false)
-            {
-                return Ok(current_url);
-            }
+        let current_url = runtime.get_url().await?;
+        if !current_url.trim().is_empty() {
+            last_url = current_url.clone();
         }
 
-        let body_text = runtime.get_text("body").await.unwrap_or_default();
-        if looks_like_wechat_dashboard_text(&body_text) {
-            return Ok(last_url);
+        if looks_like_wechat_url(&current_url) && evaluate_bool(runtime, dashboard_ready_script).await?
+        {
+            return Ok(current_url);
         }
 
         if Instant::now() >= deadline {
@@ -1824,27 +1643,15 @@ async fn wait_for_text<R: BrowserRuntime>(
         format!(r#"(() => (document.body?.innerText || "").includes({expected_json}))()"#);
     let deadline = Instant::now() + timeout;
     loop {
-        let text = runtime.get_text("body").await.unwrap_or_default();
+        let text = runtime.get_text("body").await?;
         if text.contains(expected) {
             return Ok(());
         }
         if evaluate_bool(runtime, &inner_text_script).await? {
             return Ok(());
         }
-        if is_wechat_article_entry_text(expected)
-            && evaluate_bool(
-                runtime,
-                r#"(() => !!document.querySelector(".js_title") && !!document.querySelector(".ProseMirror"))()"#,
-            )
-            .await?
-        {
-            return Ok(());
-        }
 
         if Instant::now() >= deadline {
-            if is_wechat_article_entry_text(expected) {
-                return Ok(());
-            }
             return Err(PostpubError::External(format!(
                 "timed out waiting for wechat text: {expected}"
             )));
@@ -1852,10 +1659,6 @@ async fn wait_for_text<R: BrowserRuntime>(
 
         sleep(Duration::from_millis(500)).await;
     }
-}
-
-fn is_wechat_article_entry_text(expected: &str) -> bool {
-    matches!(expected, "写新文章" | "写文章" | "写新图文")
 }
 
 fn looks_like_wechat_url(url: &str) -> bool {
@@ -1867,12 +1670,6 @@ fn looks_like_wechat_url(url: &str) -> bool {
                 .map(|host| host.eq_ignore_ascii_case("mp.weixin.qq.com"))
         })
         .unwrap_or(false)
-}
-
-fn looks_like_wechat_dashboard_text(text: &str) -> bool {
-    ["公众号", "内容管理", "登录", "首页"]
-        .iter()
-        .any(|needle| text.contains(needle))
 }
 
 async fn wait_until_true<R: BrowserRuntime>(
@@ -1898,6 +1695,15 @@ async fn wait_until_true<R: BrowserRuntime>(
 
 async fn evaluate_bool<R: BrowserRuntime>(runtime: &R, script: &str) -> Result<bool> {
     Ok(runtime.evaluate(script).await?.trim() == "true")
+}
+
+async fn wait_for_editor_ready<R: BrowserRuntime>(runtime: &R, timeout: Duration) -> Result<()> {
+    wait_until_true(
+        runtime,
+        r#"(() => !!document.querySelector(".js_title") && !!document.querySelector(".ProseMirror"))()"#,
+        timeout,
+    )
+    .await
 }
 
 fn extract_first_heading(input: &str) -> Option<String> {
@@ -2066,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn first_image_strategy_prefers_body_image_before_ai_fallback() {
+    fn first_image_strategy_requires_body_image() {
         let temp = tempdir().expect("temp dir");
         let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
         context.bootstrap().expect("bootstrap");
@@ -2075,23 +1881,21 @@ mod tests {
         let mut target = PublishTargetConfig::default();
         target.wechat.cover_strategy = "first_image".to_string();
 
-        let plans = resolve_wechat_cover_plans(
+        let cover = resolve_wechat_cover_request(
             &context,
             &target,
             &article,
             r#"<section><img src="https://example.com/cover.png" /></section>"#,
         )
-        .expect("cover plans");
+        .expect("cover request");
 
-        assert!(matches!(
-            plans.first(),
-            Some(WechatCoverPlan::BodyFirstImage)
-        ));
-        assert!(matches!(plans.last(), Some(WechatCoverPlan::PlatformAi)));
+        assert!(matches!(cover.plan, WechatCoverPlan::BodyFirstImage));
+        assert_eq!(cover.size.width, target.wechat.cover_width);
+        assert_eq!(cover.size.height, target.wechat.cover_height);
     }
 
     #[test]
-    fn article_cover_strategy_falls_back_to_platform_ai_when_no_local_cover_exists() {
+    fn article_cover_strategy_requires_local_cover() {
         let temp = tempdir().expect("temp dir");
         let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
         context.bootstrap().expect("bootstrap");
@@ -2099,25 +1903,24 @@ mod tests {
         let article = sample_article("demo.md");
         let target = PublishTargetConfig::default();
 
-        let plans = resolve_wechat_cover_plans(
+        let result = resolve_wechat_cover_request(
             &context,
             &target,
             &article,
             "<section><p>Body</p></section>",
-        )
-        .expect("cover plans");
+        );
 
-        assert_eq!(plans.len(), 1);
-        assert!(matches!(plans[0], WechatCoverPlan::PlatformAi));
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("cover"));
     }
 
     #[test]
-    fn resolving_cover_plans_fails_fast_when_custom_cover_is_missing() {
+    fn resolving_cover_request_fails_fast_when_custom_cover_is_missing() {
         let temp = tempdir().expect("temp dir");
         let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
         context.bootstrap().expect("bootstrap");
 
-        let result = resolve_wechat_cover_plans(
+        let result = resolve_wechat_cover_request(
             &context,
             &sample_target(),
             &sample_article("demo.md"),
@@ -2128,8 +1931,19 @@ mod tests {
         assert!(result.err().unwrap().to_string().contains("cover"));
     }
 
+    #[test]
+    fn rejects_invalid_wechat_cover_size() {
+        let mut target = sample_target();
+        target.wechat.cover_width = 0;
+
+        let result = resolve_wechat_cover_size(&target);
+
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("invalid wechat cover size"));
+    }
+
     #[tokio::test]
-    async fn open_wechat_dashboard_uses_short_open_timeout_for_recovery() {
+    async fn open_wechat_dashboard_uses_short_open_timeout() {
         let runtime = MockRuntime::with_eval_results(&["true"]);
         runtime.urls.lock().unwrap().push_back(
             "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=123".to_string(),
