@@ -549,9 +549,7 @@ mod tests {
             .save_generated_article("Variant|Repair", "md", "# Title\n\nBody")
             .expect("save article");
 
-        let variants_path = paths
-            .articles_dir()
-            .join("Variant_Repair.variants.json");
+        let variants_path = paths.articles_dir().join("Variant_Repair.variants.json");
         fs::write(
             &variants_path,
             serde_json::to_string_pretty(&ArticleVariantsFile {

@@ -47,10 +47,7 @@ pub(crate) fn repair_mojibake(value: &str) -> Option<String> {
     changed.then_some(current)
 }
 
-fn decode_utf8_from_reencoded_text(
-    value: &str,
-    encoding: &'static Encoding,
-) -> Option<String> {
+fn decode_utf8_from_reencoded_text(value: &str, encoding: &'static Encoding) -> Option<String> {
     let (bytes, _, had_errors) = encoding.encode(value);
     if had_errors {
         return None;
@@ -82,9 +79,9 @@ fn text_quality_score(value: &str) -> i32 {
                 '\u{4E00}'..='\u{9FFF}' => 4,
                 'a'..='z' | 'A'..='Z' | '0'..='9' => 1,
                 ' ' | '-' | '_' | '.' | ',' | ':' | ';' | '/' | '\'' | '"' | '(' | ')' => 1,
-                'Ã' | 'Â' | 'Å' | 'Ä' | 'Æ' | 'Ç' | 'È' | 'É' | 'Î' | 'Ï' | 'Ð' | 'Ò'
-                | 'Ó' | 'Ô' | 'Ö' | 'Ù' | 'Û' | 'Ü' | 'å' | 'ä' | 'æ' | 'ç' | 'è' | 'é'
-                | 'ê' | 'î' | 'ï' | 'ð' | 'ò' | 'ó' | 'ô' | 'ö' | 'ù' | 'û' | 'ü' => -3,
+                'Ã' | 'Â' | 'Å' | 'Ä' | 'Æ' | 'Ç' | 'È' | 'É' | 'Î' | 'Ï' | 'Ð' | 'Ò' | 'Ó'
+                | 'Ô' | 'Ö' | 'Ù' | 'Û' | 'Ü' | 'å' | 'ä' | 'æ' | 'ç' | 'è' | 'é' | 'ê' | 'î'
+                | 'ï' | 'ð' | 'ò' | 'ó' | 'ô' | 'ö' | 'ù' | 'û' | 'ü' => -3,
                 _ => 0,
             }
     })

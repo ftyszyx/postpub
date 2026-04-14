@@ -1,6 +1,6 @@
 use std::{
     env, fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use postpub_types::AppPathsInfo;
@@ -25,12 +25,12 @@ impl AppPaths {
             .unwrap_or_else(|| Self::workspace_root().join(".postpub"))
             .join("postpub");
 
-        Self { app_root }
+        Self::from_root(app_root)
     }
 
     pub fn from_root(root: impl Into<PathBuf>) -> Self {
         Self {
-            app_root: root.into(),
+            app_root: normalize_absolute_path(root.into()),
         }
     }
 
@@ -119,24 +119,24 @@ impl AppPaths {
 
     pub fn as_info(&self) -> AppPathsInfo {
         AppPathsInfo {
-            app_root: self.app_root.display().to_string(),
-            config_dir: self.config_dir().display().to_string(),
-            articles_dir: self.articles_dir().display().to_string(),
-            templates_dir: self.templates_dir().display().to_string(),
-            images_dir: self.images_dir().display().to_string(),
-            logs_dir: self.logs_dir().display().to_string(),
-            temp_dir: self.temp_dir().display().to_string(),
-            runtime_dir: self.runtime_dir().display().to_string(),
-            browser_dir: self.browser_dir().display().to_string(),
-            browser_profiles_dir: self.browser_profiles_dir().display().to_string(),
-            config_file: self.config_file().display().to_string(),
-            aiforge_config_file: self.aiforge_config_file().display().to_string(),
-            ui_config_file: self.ui_config_file().display().to_string(),
-            publish_records_file: self.publish_records_file().display().to_string(),
-            publish_tasks_file: self.publish_tasks_file().display().to_string(),
+            app_root: display_path(&self.app_root),
+            config_dir: display_path(&self.config_dir()),
+            articles_dir: display_path(&self.articles_dir()),
+            templates_dir: display_path(&self.templates_dir()),
+            images_dir: display_path(&self.images_dir()),
+            logs_dir: display_path(&self.logs_dir()),
+            temp_dir: display_path(&self.temp_dir()),
+            runtime_dir: display_path(&self.runtime_dir()),
+            browser_dir: display_path(&self.browser_dir()),
+            browser_profiles_dir: display_path(&self.browser_profiles_dir()),
+            config_file: display_path(&self.config_file()),
+            aiforge_config_file: display_path(&self.aiforge_config_file()),
+            ui_config_file: display_path(&self.ui_config_file()),
+            publish_records_file: display_path(&self.publish_records_file()),
+            publish_tasks_file: display_path(&self.publish_tasks_file()),
             embedded_browser_executable: self
                 .embedded_browser_executable()
-                .map(|path| path.display().to_string()),
+                .map(|path| display_path(&path)),
         }
     }
 
@@ -144,7 +144,11 @@ impl AppPaths {
         self.browser_executable_candidates()
             .into_iter()
             .find(|path| path.is_file())
-            .and_then(|path| path.canonicalize().ok().or(Some(path)))
+            .and_then(|path| {
+                path.canonicalize()
+                    .ok()
+                    .or_else(|| Some(normalize_absolute_path(path)))
+            })
     }
 
     fn browser_executable_candidates(&self) -> Vec<PathBuf> {
@@ -178,10 +182,53 @@ impl AppPaths {
     }
 
     fn workspace_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
+        normalize_absolute_path(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join(".."),
+        )
     }
+}
+
+pub(crate) fn normalize_absolute_path(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map(|current_dir| current_dir.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let _ = normalized.pop();
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+
+    normalized
+}
+
+pub(crate) fn display_path(path: impl AsRef<Path>) -> String {
+    let mut rendered = normalize_absolute_path(path).display().to_string();
+
+    #[cfg(windows)]
+    {
+        if let Some(stripped) = rendered.strip_prefix(r"\\?\UNC\") {
+            rendered = format!(r"\\{stripped}");
+        } else if let Some(stripped) = rendered.strip_prefix(r"\\?\") {
+            rendered = stripped.to_string();
+        }
+    }
+
+    rendered
 }
 
 #[cfg(test)]
@@ -190,7 +237,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::AppPaths;
+    use super::{normalize_absolute_path, AppPaths};
 
     #[test]
     fn builds_expected_child_paths_from_root() {
@@ -257,5 +304,18 @@ mod tests {
             .embedded_browser_executable()
             .expect("embedded browser path");
         assert!(discovered.ends_with("chrome.exe"));
+    }
+
+    #[test]
+    fn normalizes_root_with_parent_segments() {
+        let temp = tempdir().expect("temp dir");
+        let root = temp.path().join("runtime").join("..").join("postpub-data");
+        let paths = AppPaths::from_root(&root);
+
+        assert_eq!(paths.app_root(), normalize_absolute_path(root).as_path());
+        assert!(
+            !paths.app_root().to_string_lossy().contains(".."),
+            "normalized app root should not contain parent segments"
+        );
     }
 }

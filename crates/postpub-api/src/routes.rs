@@ -34,6 +34,10 @@ pub fn api_router() -> Router<ApiState> {
         .route("/api/system/paths", get(paths))
         .route("/api/system/browser", get(browser_status))
         .route(
+            "/api/system/browser/open/{*target_id}",
+            post(open_browser_homepage),
+        )
+        .route(
             "/api/system/browser/profiles/{*target_id}",
             axum::routing::delete(clear_browser_profile),
         )
@@ -123,6 +127,34 @@ async fn clear_browser_profile(
             "profile_dir": profile_dir.display().to_string()
         }),
         "browser profile cleared",
+    )))
+}
+
+async fn open_browser_homepage(
+    State(state): State<ApiState>,
+    Path(target_id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let bundle = state.context.config_store().load_bundle()?;
+    let target = bundle
+        .config
+        .publish_targets
+        .into_iter()
+        .find(|target| target.id == target_id)
+        .ok_or_else(|| ApiError::not_found(format!("publish target not found: {target_id}")))?;
+
+    let profile_dir = state
+        .context
+        .browser_manager()
+        .open_target_homepage(&target)
+        .await?;
+
+    Ok(Json(ApiResponse::with_message(
+        serde_json::json!({
+            "target_id": target.id,
+            "profile_dir": profile_dir.display().to_string(),
+            "url": target.publish_url
+        }),
+        "browser homepage opened",
     )))
 }
 

@@ -187,8 +187,11 @@ mod tests {
         config.publish_targets[0].name = latin1_mojibake("微信公众号 1");
 
         let config_file = AppPaths::from_root(temp.path().to_path_buf()).config_file();
-        fs::write(&config_file, serde_yaml::to_string(&config).expect("serialize config"))
-            .expect("write config");
+        fs::write(
+            &config_file,
+            serde_yaml::to_string(&config).expect("serialize config"),
+        )
+        .expect("write config");
 
         let loaded = store.load_config().expect("load repaired config");
         assert_eq!(loaded.img_api.providers[1].name, "阿里万相");

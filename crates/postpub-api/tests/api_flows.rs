@@ -108,6 +108,21 @@ async fn wait_for_publish_task_completion(app: &Router, task_id: &str) -> Publis
     final_task.expect("publish task completed")
 }
 
+fn configure_invalid_wechat_publish_target(context: &Arc<AppContext>) {
+    let mut bundle = context.config_store().load_bundle().expect("load bundle");
+    let target = bundle
+        .config
+        .publish_targets
+        .iter_mut()
+        .find(|item| item.id == "publish-wechat-1")
+        .expect("wechat publish target");
+    target.wechat.enable_reward = true;
+    context
+        .config_store()
+        .save_config(&bundle.config)
+        .expect("save config");
+}
+
 #[tokio::test]
 async fn config_endpoints_roundtrip() {
     let (app, _, _temp) = test_app();
@@ -627,8 +642,9 @@ async fn generation_task_retry_reuses_existing_task_id() {
 }
 
 #[tokio::test]
-async fn publish_task_fails_with_clear_wechat_placeholder_error() {
+async fn publish_task_fails_with_clear_wechat_validation_error() {
     let (app, context, _temp) = test_app();
+    configure_invalid_wechat_publish_target(&context);
 
     let article = context
         .article_store()
@@ -677,7 +693,7 @@ async fn publish_task_fails_with_clear_wechat_placeholder_error() {
         .error
         .as_deref()
         .unwrap_or_default()
-        .contains("wechat publisher is not implemented yet"));
+        .contains("wechat reward automation is not implemented yet"));
     assert!(finished.events.iter().any(|event| event.stage == "prepare"));
     assert!(finished
         .events
@@ -688,6 +704,7 @@ async fn publish_task_fails_with_clear_wechat_placeholder_error() {
 #[tokio::test]
 async fn publish_task_retry_reuses_existing_task_id() {
     let (app, context, _temp) = test_app();
+    configure_invalid_wechat_publish_target(&context);
 
     let article = context
         .article_store()

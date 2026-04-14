@@ -39,6 +39,10 @@ pub trait BrowserRuntime: Send + Sync {
         ))
     }
 
+    async fn open_with_timeout_ms(&self, url: &str, _timeout_ms: u64) -> Result<()> {
+        self.open(url).await
+    }
+
     async fn click(&self, _selector: &str) -> Result<()> {
         Err(PostpubError::External(
             "browser runtime is not configured yet".to_string(),
@@ -147,6 +151,16 @@ impl AgentBrowserRuntime {
     }
 
     async fn run_with_stdin(&self, args: &[&str], stdin: Option<&str>) -> Result<String> {
+        self.run_with_options(args, stdin, &[], None).await
+    }
+
+    async fn run_with_options(
+        &self,
+        args: &[&str],
+        stdin: Option<&str>,
+        env_overrides: &[(&str, &str)],
+        command_timeout: Option<Duration>,
+    ) -> Result<String> {
         let mut command = build_agent_browser_command(&self.program);
         if self.headed {
             command.arg("--headed");
@@ -156,6 +170,9 @@ impl AgentBrowserRuntime {
         }
         if let Some(path) = &self.browser_profile {
             command.arg("--profile").arg(path);
+        }
+        for (key, value) in env_overrides {
+            command.env(key, value);
         }
         command.arg("--session").arg(&self.session_name);
         command.args(args);
@@ -177,11 +194,13 @@ impl AgentBrowserRuntime {
             handle.shutdown().await?;
         }
 
-        let output = timeout(Duration::from_secs(45), child.wait_with_output())
+        let command_timeout = command_timeout.unwrap_or_else(|| Duration::from_secs(45));
+        let output = timeout(command_timeout, child.wait_with_output())
             .await
             .map_err(|_| {
                 PostpubError::External(format!(
-                    "agent-browser command timed out after 45s: {}",
+                    "agent-browser command timed out after {}: {}",
+                    format_duration_for_log(command_timeout),
                     args.join(" ")
                 ))
             })??;
@@ -324,6 +343,19 @@ impl BrowserRuntime for AgentBrowserRuntime {
         self.run(&["open", url]).await.map(|_| ())
     }
 
+    async fn open_with_timeout_ms(&self, url: &str, timeout_ms: u64) -> Result<()> {
+        let timeout = timeout_ms.to_string();
+        let command_timeout_ms = (timeout_ms.saturating_add(3_000)).max(8_000);
+        self.run_with_options(
+            &["open", url],
+            None,
+            &[("AGENT_BROWSER_DEFAULT_TIMEOUT", timeout.as_str())],
+            Some(Duration::from_millis(command_timeout_ms)),
+        )
+        .await
+        .map(|_| ())
+    }
+
     async fn click(&self, selector: &str) -> Result<()> {
         self.run(&["click", selector]).await.map(|_| ())
     }
@@ -383,5 +415,13 @@ fn env_flag_with_default(name: &str, default: bool) -> bool {
             "1" | "true" | "yes" | "on"
         ),
         None => default,
+    }
+}
+
+fn format_duration_for_log(duration: Duration) -> String {
+    if duration.subsec_nanos() == 0 && duration.as_secs() > 0 {
+        format!("{}s", duration.as_secs())
+    } else {
+        format!("{}ms", duration.as_millis())
     }
 }

@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { apiDelete, apiGet, encodePathSegments, type ApiResponse } from "../api/client";
+import {
+  apiDelete,
+  apiGet,
+  apiPost,
+  encodePathSegments,
+  type ApiResponse,
+} from "../api/client";
 import {
   Button as AButton,
   Empty as AEmpty,
@@ -13,7 +19,8 @@ import {
   Space as ASpace,
   Switch as ASwitch,
   Table as ATable,
-  Tag as ATag
+  Tag as ATag,
+  message,
 } from "ant-design-vue";
 import { useI18n } from "vue-i18n";
 import { useRoute, useRouter } from "vue-router";
@@ -25,7 +32,7 @@ import type {
   CustomLlmProvider,
   ImageModelProvider,
   PublishTargetConfig,
-  TemplateSummary
+  TemplateSummary,
 } from "../types/postpub";
 
 const route = useRoute();
@@ -35,10 +42,16 @@ const configStore = useConfigStore();
 const navigationStore = useNavigationStore();
 const templateStore = useTemplateStore();
 
-const activeSection = computed<ConfigPanel>(() => navigationStore.activeConfigPanel);
+const activeSection = computed<ConfigPanel>(
+  () => navigationStore.activeConfigPanel,
+);
 const imageModels = computed(() => configStore.bundle.config.img_api.providers);
-const customProviders = computed(() => configStore.bundle.ui_config.custom_llm_providers);
-const publishTargets = computed(() => configStore.bundle.config.publish_targets);
+const customProviders = computed(
+  () => configStore.bundle.ui_config.custom_llm_providers,
+);
+const publishTargets = computed(
+  () => configStore.bundle.config.publish_targets,
+);
 
 const imageModelModalOpen = ref(false);
 const imageModelEditId = ref<string | null>(null);
@@ -55,96 +68,191 @@ const publishTargetBrowserStatus = ref<BrowserEnvironmentStatus | null>(null);
 const publishTargetBrowserLoading = ref(false);
 const publishTargetBrowserError = ref("");
 const publishTargetBrowserMessage = ref("");
+const publishTargetOpeningId = ref("");
 
 const publishTargetTemplateOptions = computed(() =>
   templateStore.templates.filter(
-    (template: TemplateSummary) => template.category === publishTargetDraft.value.template_category
-  )
+    (template: TemplateSummary) =>
+      template.category === publishTargetDraft.value.template_category,
+  ),
 );
 
 const imageModelTypeOptions = computed(() => [
   { value: "picsum", label: t("config.sections.imageProviderPicsum") },
-  { value: "ali", label: t("config.sections.imageProviderAli") }
+  { value: "ali", label: t("config.sections.imageProviderAli") },
 ]);
 
 const llmProtocolOptions = computed(() => [
   { value: "openai", label: t("config.sections.llmProtocolOpenAi") },
-  { value: "openai_compatible", label: t("config.sections.llmProtocolOpenAiCompatible") },
-  { value: "ollama", label: t("config.sections.llmProtocolOllama") }
+  {
+    value: "openai_compatible",
+    label: t("config.sections.llmProtocolOpenAiCompatible"),
+  },
+  { value: "ollama", label: t("config.sections.llmProtocolOllama") },
 ]);
 
 const publishPlatformTypeOptions = computed(() => [
-  { value: "wechat", label: t("config.sections.publishPlatformTypeWechat") }
+  { value: "wechat", label: t("config.sections.publishPlatformTypeWechat") },
 ]);
 
 const wechatCoverStrategyOptions = computed(() => [
-  { value: "article_cover", label: t("config.sections.wechatCoverStrategyArticleCover") },
-  { value: "first_image", label: t("config.sections.wechatCoverStrategyFirstImage") },
-  { value: "custom_path", label: t("config.sections.wechatCoverStrategyCustomPath") },
-  { value: "manual", label: t("config.sections.wechatCoverStrategyManual") }
+  {
+    value: "article_cover",
+    label: t("config.sections.wechatCoverStrategyArticleCover"),
+  },
+  {
+    value: "first_image",
+    label: t("config.sections.wechatCoverStrategyFirstImage"),
+  },
+  {
+    value: "custom_path",
+    label: t("config.sections.wechatCoverStrategyCustomPath"),
+  },
+  {
+    value: "platform_ai",
+    label: t("config.sections.wechatCoverStrategyPlatformAi"),
+  },
+  { value: "manual", label: t("config.sections.wechatCoverStrategyManual") },
 ]);
 
 const wechatCommentModeOptions = computed(() => [
-  { value: "auto_selected_open", label: t("config.sections.wechatCommentModeAutoSelectedOpen") },
+  {
+    value: "auto_selected_open",
+    label: t("config.sections.wechatCommentModeAutoSelectedOpen"),
+  },
   { value: "open_all", label: t("config.sections.wechatCommentModeOpenAll") },
-  { value: "closed", label: t("config.sections.wechatCommentModeClosed") }
+  { value: "closed", label: t("config.sections.wechatCommentModeClosed") },
 ]);
 
 const publishTargetCategoryOptions = computed(() =>
   templateStore.categories.map((category) => ({
     value: category.name,
-    label: category.name
-  }))
+    label: category.name,
+  })),
 );
 
 const publishTargetTemplateNameOptions = computed(() =>
   publishTargetTemplateOptions.value.map((template) => ({
     value: template.name,
-    label: template.name
-  }))
+    label: template.name,
+  })),
 );
 
 const imageModelColumns = computed(() => [
   { title: t("common.name"), key: "name", dataIndex: "name", ellipsis: true },
-  { title: t("config.sections.providerType"), key: "provider_type", dataIndex: "provider_type", width: 180 },
-  { title: t("config.sections.modelName"), key: "model", dataIndex: "model", ellipsis: true },
+  {
+    title: t("config.sections.providerType"),
+    key: "provider_type",
+    dataIndex: "provider_type",
+    width: 180,
+  },
+  {
+    title: t("config.sections.modelName"),
+    key: "model",
+    dataIndex: "model",
+    ellipsis: true,
+  },
   { title: t("common.status"), key: "status", width: 140 },
-  { title: t("common.actions"), key: "actions", width: 240, fixed: "right" as const }
+  {
+    title: t("common.actions"),
+    key: "actions",
+    width: 240,
+    fixed: "right" as const,
+  },
 ]);
 
 const llmModelColumns = computed(() => [
-  { title: t("config.sections.displayName"), key: "name", dataIndex: "name", ellipsis: true },
-  { title: t("config.sections.protocolType"), key: "protocol_type", dataIndex: "protocol_type", width: 140 },
-  { title: t("config.sections.modelName"), key: "model", dataIndex: "model", ellipsis: true },
-  { title: t("config.sections.apiBase"), key: "api_base", dataIndex: "api_base", ellipsis: true },
+  {
+    title: t("config.sections.displayName"),
+    key: "name",
+    dataIndex: "name",
+    ellipsis: true,
+  },
+  {
+    title: t("config.sections.protocolType"),
+    key: "protocol_type",
+    dataIndex: "protocol_type",
+    width: 140,
+  },
+  {
+    title: t("config.sections.modelName"),
+    key: "model",
+    dataIndex: "model",
+    ellipsis: true,
+  },
+  {
+    title: t("config.sections.apiBase"),
+    key: "api_base",
+    dataIndex: "api_base",
+    ellipsis: true,
+  },
   { title: t("config.sections.apiKey"), key: "api_key_status", width: 180 },
   { title: t("common.status"), key: "status", width: 120 },
-  { title: t("common.actions"), key: "actions", width: 260, fixed: "right" as const }
+  {
+    title: t("common.actions"),
+    key: "actions",
+    width: 260,
+    fixed: "right" as const,
+  },
 ]);
 
 const publishPlatformColumns = computed(() => [
   { title: t("common.name"), key: "name", dataIndex: "name", ellipsis: true },
-  { title: t("config.sections.platformType"), key: "platform_type", dataIndex: "platform_type", width: 160 },
-  { title: t("config.sections.accountName"), key: "account_name", dataIndex: "account_name", ellipsis: true },
-  { title: t("config.sections.publishUrl"), key: "publish_url", dataIndex: "publish_url", ellipsis: true },
-  { title: t("config.sections.templateRule"), key: "template_rule", width: 220, ellipsis: true },
-  { title: t("config.sections.wechatSettingsSummary"), key: "wechat_settings", width: 280, ellipsis: true },
+  {
+    title: t("config.sections.platformType"),
+    key: "platform_type",
+    dataIndex: "platform_type",
+    width: 160,
+  },
+  {
+    title: t("config.sections.accountName"),
+    key: "account_name",
+    dataIndex: "account_name",
+    ellipsis: true,
+  },
+  {
+    title: t("config.sections.publishUrl"),
+    key: "publish_url",
+    dataIndex: "publish_url",
+    ellipsis: true,
+  },
+  {
+    title: t("config.sections.templateRule"),
+    key: "template_rule",
+    width: 220,
+    ellipsis: true,
+  },
+  {
+    title: t("config.sections.wechatSettingsSummary"),
+    key: "wechat_settings",
+    width: 280,
+    ellipsis: true,
+  },
   { title: t("common.status"), key: "status", width: 120 },
-  { title: t("common.actions"), key: "actions", width: 180, fixed: "right" as const }
+  {
+    title: t("common.actions"),
+    key: "actions",
+    width: 260,
+    fixed: "right" as const,
+  },
 ]);
 
-function createImageModelDraft(index = imageModels.value.length + 1): ImageModelProvider {
+function createImageModelDraft(
+  index = imageModels.value.length + 1,
+): ImageModelProvider {
   return {
     id: `image-model-${Date.now()}-${index}`,
     name: t("config.sections.imageModelDraftName", { index }),
     provider_type: "picsum",
     api_key: "",
     model: "",
-    enabled: true
+    enabled: true,
   };
 }
 
-function createLlmDraft(index = customProviders.value.length + 1): CustomLlmProvider {
+function createLlmDraft(
+  index = customProviders.value.length + 1,
+): CustomLlmProvider {
   return {
     id: `custom-${Date.now()}-${index}`,
     name: t("config.sections.customProviderName", { index }),
@@ -153,11 +261,13 @@ function createLlmDraft(index = customProviders.value.length + 1): CustomLlmProv
     model: "gpt-4o-mini",
     protocol_type: "openai",
     max_tokens: 8192,
-    enabled: index === 1
+    enabled: index === 1,
   };
 }
 
-function createPublishTargetDraft(index = publishTargets.value.length + 1): PublishTargetConfig {
+function createPublishTargetDraft(
+  index = publishTargets.value.length + 1,
+): PublishTargetConfig {
   return {
     id: `publish-wechat-${Date.now()}-${index}`,
     name: t("config.sections.publishPlatformDraftName", { index }),
@@ -185,15 +295,15 @@ function createPublishTargetDraft(index = publishTargets.value.length + 1): Publ
       collection_id: "",
       source_url: "",
       source_label: "",
-      platform_recommendation_enabled: true
-    }
+      platform_recommendation_enabled: true,
+    },
   };
 }
 
 function ensurePublishTargetTemplateSelection() {
   const draft = publishTargetDraft.value;
   const matched = publishTargetTemplateOptions.value.find(
-    (template: TemplateSummary) => template.name === draft.template_name
+    (template: TemplateSummary) => template.name === draft.template_name,
   );
   if (!matched) {
     draft.template_name = publishTargetTemplateOptions.value[0]?.name || "";
@@ -213,11 +323,18 @@ function asPublishTarget(record: unknown) {
 }
 
 function imageProviderTypeLabel(providerType: string) {
-  return imageModelTypeOptions.value.find((option) => option.value === providerType)?.label || providerType;
+  return (
+    imageModelTypeOptions.value.find((option) => option.value === providerType)
+      ?.label || providerType
+  );
 }
 
 function publishPlatformTypeLabel(platformType: string) {
-  return publishPlatformTypeOptions.value.find((option) => option.value === platformType)?.label || platformType;
+  return (
+    publishPlatformTypeOptions.value.find(
+      (option) => option.value === platformType,
+    )?.label || platformType
+  );
 }
 
 function enabledTag(enabled: boolean) {
@@ -233,7 +350,10 @@ function llmProviderTag(provider: CustomLlmProvider) {
 }
 
 function llmProtocolLabel(protocolType: string) {
-  return llmProtocolOptions.value.find((option) => option.value === protocolType)?.label || protocolType;
+  return (
+    llmProtocolOptions.value.find((option) => option.value === protocolType)
+      ?.label || protocolType
+  );
 }
 
 function llmApiKeyTag(provider: CustomLlmProvider) {
@@ -259,11 +379,17 @@ function publishTargetTemplateRule(target: PublishTargetConfig) {
 }
 
 function wechatCoverStrategyLabel(strategy: string) {
-  return wechatCoverStrategyOptions.value.find((option) => option.value === strategy)?.label || strategy;
+  return (
+    wechatCoverStrategyOptions.value.find((option) => option.value === strategy)
+      ?.label || strategy
+  );
 }
 
 function wechatCommentModeLabel(mode: string) {
-  return wechatCommentModeOptions.value.find((option) => option.value === mode)?.label || mode;
+  return (
+    wechatCommentModeOptions.value.find((option) => option.value === mode)
+      ?.label || mode
+  );
 }
 
 function publishTargetWechatSummary(target: PublishTargetConfig) {
@@ -273,7 +399,7 @@ function publishTargetWechatSummary(target: PublishTargetConfig) {
 
   const parts = [
     wechatCoverStrategyLabel(target.wechat.cover_strategy),
-    wechatCommentModeLabel(target.wechat.comment_mode)
+    wechatCommentModeLabel(target.wechat.comment_mode),
   ];
 
   if (target.wechat.declare_original) {
@@ -290,23 +416,33 @@ function publishTargetWechatSummary(target: PublishTargetConfig) {
 function syncActiveImageProvider(providerId?: string) {
   const nextActiveProvider =
     imageModels.value.find((provider) => provider.id === providerId) ||
-    imageModels.value.find((provider) => provider.id === configStore.bundle.config.img_api.active_provider_id) ||
+    imageModels.value.find(
+      (provider) =>
+        provider.id === configStore.bundle.config.img_api.active_provider_id,
+    ) ||
     imageModels.value[0];
 
-  configStore.bundle.config.img_api.active_provider_id = nextActiveProvider?.id || "";
-  configStore.bundle.config.img_api.api_type = nextActiveProvider?.provider_type || "picsum";
+  configStore.bundle.config.img_api.active_provider_id =
+    nextActiveProvider?.id || "";
+  configStore.bundle.config.img_api.api_type =
+    nextActiveProvider?.provider_type || "picsum";
 }
 
 async function setActiveImageModel(id: string) {
-  configStore.bundle.config.img_api.providers = imageModels.value.map((provider) => ({
-    ...provider,
-    enabled: provider.id === id ? true : provider.enabled
-  }));
+  configStore.bundle.config.img_api.providers = imageModels.value.map(
+    (provider) => ({
+      ...provider,
+      enabled: provider.id === id ? true : provider.enabled,
+    }),
+  );
   syncActiveImageProvider(id);
   await persistConfigMutation();
 }
 
-function normalizeLlmProviders(providers: CustomLlmProvider[], preferredId?: string) {
+function normalizeLlmProviders(
+  providers: CustomLlmProvider[],
+  preferredId?: string,
+) {
   const nextProviders = providers.length ? providers : [createLlmDraft(1)];
   const activeProvider =
     nextProviders.find((provider) => provider.id === preferredId) ||
@@ -315,7 +451,7 @@ function normalizeLlmProviders(providers: CustomLlmProvider[], preferredId?: str
 
   return nextProviders.map((provider) => ({
     ...provider,
-    enabled: provider.id === activeProvider.id
+    enabled: provider.id === activeProvider.id,
   }));
 }
 
@@ -324,7 +460,9 @@ async function persistConfigMutation() {
 }
 
 async function removeImageModel(id: string) {
-  configStore.bundle.config.img_api.providers = imageModels.value.filter((provider) => provider.id !== id);
+  configStore.bundle.config.img_api.providers = imageModels.value.filter(
+    (provider) => provider.id !== id,
+  );
   syncActiveImageProvider();
   await persistConfigMutation();
 }
@@ -353,8 +491,8 @@ async function saveImageModelDraft() {
   }
 
   if (imageModelEditId.value) {
-  configStore.bundle.config.img_api.providers = imageModels.value.map((provider) =>
-      provider.id === imageModelEditId.value ? draft : provider
+    configStore.bundle.config.img_api.providers = imageModels.value.map(
+      (provider) => (provider.id === imageModelEditId.value ? draft : provider),
     );
   } else {
     configStore.bundle.config.img_api.providers.push(draft);
@@ -393,7 +531,7 @@ async function saveLlmDraft() {
   let nextProviders: CustomLlmProvider[];
   if (llmEditId.value) {
     nextProviders = customProviders.value.map((provider) =>
-      provider.id === llmEditId.value ? draft : provider
+      provider.id === llmEditId.value ? draft : provider,
     );
   } else {
     nextProviders = [...customProviders.value, draft];
@@ -401,7 +539,7 @@ async function saveLlmDraft() {
 
   configStore.bundle.ui_config.custom_llm_providers = normalizeLlmProviders(
     nextProviders,
-    draft.enabled ? draft.id : undefined
+    draft.enabled ? draft.id : undefined,
   );
 
   await persistConfigMutation();
@@ -411,13 +549,19 @@ async function saveLlmDraft() {
 }
 
 async function setActiveLlmProvider(id: string) {
-  configStore.bundle.ui_config.custom_llm_providers = normalizeLlmProviders(customProviders.value, id);
+  configStore.bundle.ui_config.custom_llm_providers = normalizeLlmProviders(
+    customProviders.value,
+    id,
+  );
   await persistConfigMutation();
 }
 
 async function removeCustomProvider(id: string) {
-  const remaining = customProviders.value.filter((provider) => provider.id !== id);
-  configStore.bundle.ui_config.custom_llm_providers = normalizeLlmProviders(remaining);
+  const remaining = customProviders.value.filter(
+    (provider) => provider.id !== id,
+  );
+  configStore.bundle.ui_config.custom_llm_providers =
+    normalizeLlmProviders(remaining);
   await persistConfigMutation();
 }
 
@@ -435,7 +579,7 @@ function openEditPublishTargetModal(target: PublishTargetConfig) {
   publishTargetEditId.value = target.id;
   publishTargetDraft.value = {
     ...target,
-    wechat: { ...target.wechat }
+    wechat: { ...target.wechat },
   };
   publishTargetBrowserError.value = "";
   publishTargetBrowserMessage.value = "";
@@ -456,15 +600,15 @@ function closePublishTargetModal() {
 async function savePublishTargetDraft() {
   const draft = {
     ...publishTargetDraft.value,
-    wechat: { ...publishTargetDraft.value.wechat }
+    wechat: { ...publishTargetDraft.value.wechat },
   };
   if (!draft.name.trim()) {
     draft.name = t("config.sections.publishPlatformFallbackName");
   }
 
   if (publishTargetEditId.value) {
-    configStore.bundle.config.publish_targets = publishTargets.value.map((target) =>
-      target.id === publishTargetEditId.value ? draft : target
+    configStore.bundle.config.publish_targets = publishTargets.value.map(
+      (target) => (target.id === publishTargetEditId.value ? draft : target),
     );
   } else {
     configStore.bundle.config.publish_targets.push(draft);
@@ -477,8 +621,45 @@ async function savePublishTargetDraft() {
 }
 
 async function removePublishTarget(id: string) {
-  configStore.bundle.config.publish_targets = publishTargets.value.filter((target) => target.id !== id);
+  configStore.bundle.config.publish_targets = publishTargets.value.filter(
+    (target) => target.id !== id,
+  );
   await persistConfigMutation();
+}
+
+async function openPublishTargetHomepage(target: PublishTargetConfig) {
+  publishTargetOpeningId.value = target.id;
+
+  try {
+    await apiPost<
+      ApiResponse<{ target_id: string; profile_dir: string; url: string }>
+    >(`/api/system/browser/open/${encodePathSegments(target.id)}`);
+
+    const successMessage = t("config.sections.openPublishPlatformSuccess", {
+      name: target.name || target.id,
+    });
+    message.success(successMessage);
+
+    if (publishTargetEditId.value === target.id) {
+      publishTargetBrowserMessage.value = successMessage;
+      publishTargetBrowserError.value = "";
+      await loadPublishTargetBrowserStatus(target.id);
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    message.error(
+      t("config.sections.openPublishPlatformFailed", {
+        error: detail,
+      }),
+    );
+
+    if (publishTargetEditId.value === target.id) {
+      publishTargetBrowserMessage.value = "";
+      publishTargetBrowserError.value = detail;
+    }
+  } finally {
+    publishTargetOpeningId.value = "";
+  }
 }
 
 async function loadPublishTargetBrowserStatus(targetId?: string | null) {
@@ -493,12 +674,16 @@ async function loadPublishTargetBrowserStatus(targetId?: string | null) {
   publishTargetBrowserError.value = "";
 
   try {
-    const response = await apiGet<ApiResponse<BrowserEnvironmentStatus>>("/api/system/browser", {
-      target_id: targetId
-    });
+    const response = await apiGet<ApiResponse<BrowserEnvironmentStatus>>(
+      "/api/system/browser",
+      {
+        target_id: targetId,
+      },
+    );
     publishTargetBrowserStatus.value = response.data;
   } catch (error) {
-    publishTargetBrowserError.value = error instanceof Error ? error.message : String(error);
+    publishTargetBrowserError.value =
+      error instanceof Error ? error.message : String(error);
   } finally {
     publishTargetBrowserLoading.value = false;
   }
@@ -515,12 +700,15 @@ async function clearPublishTargetBrowserProfile() {
 
   try {
     await apiDelete<ApiResponse<{ target_id: string; profile_dir: string }>>(
-      `/api/system/browser/profiles/${encodePathSegments(publishTargetEditId.value)}`
+      `/api/system/browser/profiles/${encodePathSegments(publishTargetEditId.value)}`,
     );
-    publishTargetBrowserMessage.value = t("config.sections.browserProfileCleared");
+    publishTargetBrowserMessage.value = t(
+      "config.sections.browserProfileCleared",
+    );
     await loadPublishTargetBrowserStatus(publishTargetEditId.value);
   } catch (error) {
-    publishTargetBrowserError.value = error instanceof Error ? error.message : String(error);
+    publishTargetBrowserError.value =
+      error instanceof Error ? error.message : String(error);
   } finally {
     publishTargetBrowserLoading.value = false;
   }
@@ -531,7 +719,9 @@ async function restoreDefaults() {
 }
 
 onMounted(async () => {
-  const legacyPanel = Array.isArray(route.query.panel) ? route.query.panel[0] : route.query.panel;
+  const legacyPanel = Array.isArray(route.query.panel)
+    ? route.query.panel[0]
+    : route.query.panel;
   if (legacyPanel) {
     navigationStore.setActiveConfigPanel(String(legacyPanel));
     await router.replace({ path: "/config" });
@@ -552,14 +742,14 @@ watch(
 
     navigationStore.setActiveConfigPanel(String(legacyPanel));
     await router.replace({ path: "/config" });
-  }
+  },
 );
 
 watch(
   () => publishTargetDraft.value.template_category,
   () => {
     ensurePublishTargetTemplateSelection();
-  }
+  },
 );
 </script>
 
@@ -577,7 +767,10 @@ watch(
       <div class="form-grid two-columns">
         <label class="field">
           <span>{{ t("config.sections.themeMode") }}</span>
-          <select v-model="configStore.bundle.ui_config.theme" class="text-input">
+          <select
+            v-model="configStore.bundle.ui_config.theme"
+            class="text-input"
+          >
             <option value="light">{{ t("config.sections.themeLight") }}</option>
             <option value="dark">{{ t("config.sections.themeDark") }}</option>
           </select>
@@ -586,25 +779,47 @@ watch(
 
         <label class="field">
           <span>{{ t("config.sections.windowMode") }}</span>
-          <select v-model="configStore.bundle.ui_config.window_mode" class="text-input">
-            <option value="STANDARD">{{ t("config.sections.windowModeStandard") }}</option>
-            <option value="MAXIMIZED">{{ t("config.sections.windowModeMaximized") }}</option>
+          <select
+            v-model="configStore.bundle.ui_config.window_mode"
+            class="text-input"
+          >
+            <option value="STANDARD">
+              {{ t("config.sections.windowModeStandard") }}
+            </option>
+            <option value="MAXIMIZED">
+              {{ t("config.sections.windowModeMaximized") }}
+            </option>
           </select>
-          <small class="field-help">{{ t("config.sections.windowModeHelp") }}</small>
+          <small class="field-help">{{
+            t("config.sections.windowModeHelp")
+          }}</small>
         </label>
 
         <label class="field">
           <span>{{ t("config.sections.designTheme") }}</span>
-          <select v-model="configStore.bundle.ui_config.design_theme" class="text-input">
-            <option value="follow-system">{{ t("config.sections.designThemeFollowSystem") }}</option>
-            <option value="default">{{ t("config.sections.designThemeDefault") }}</option>
+          <select
+            v-model="configStore.bundle.ui_config.design_theme"
+            class="text-input"
+          >
+            <option value="follow-system">
+              {{ t("config.sections.designThemeFollowSystem") }}
+            </option>
+            <option value="default">
+              {{ t("config.sections.designThemeDefault") }}
+            </option>
           </select>
-          <small class="field-help">{{ t("config.sections.designThemeHelp") }}</small>
+          <small class="field-help">{{
+            t("config.sections.designThemeHelp")
+          }}</small>
         </label>
       </div>
 
       <div class="config-actions-bar">
-        <AButton type="primary" :loading="configStore.saving" @click="configStore.save">
+        <AButton
+          type="primary"
+          :loading="configStore.saving"
+          @click="configStore.save"
+        >
           {{ configStore.saving ? t("common.saving") : t("config.saveConfig") }}
         </AButton>
         <AButton @click="restoreDefaults">
@@ -613,12 +828,19 @@ watch(
       </div>
     </section>
 
-    <section v-else-if="activeSection === 'image-models'" class="panel panel--config">
+    <section
+      v-else-if="activeSection === 'image-models'"
+      class="panel panel--config"
+    >
       <div class="config-panel-header">
         <div>
           <p class="eyebrow">{{ t("config.sections.imageModelsEyebrow") }}</p>
-          <h3 class="panel-title">{{ t("config.sections.imageModelsTitle") }}</h3>
-          <p class="workspace-copy">{{ t("config.sections.imageModelsDescription") }}</p>
+          <h3 class="panel-title">
+            {{ t("config.sections.imageModelsTitle") }}
+          </h3>
+          <p class="workspace-copy">
+            {{ t("config.sections.imageModelsDescription") }}
+          </p>
         </div>
         <AButton type="primary" @click="openCreateImageModelModal">
           {{ t("config.sections.addImageModel") }}
@@ -655,16 +877,26 @@ watch(
           <template v-else-if="column.key === 'actions'">
             <ASpace wrap size="small">
               <AButton
-                v-if="configStore.bundle.config.img_api.active_provider_id !== asImageModel(record).id"
+                v-if="
+                  configStore.bundle.config.img_api.active_provider_id !==
+                  asImageModel(record).id
+                "
                 size="small"
                 @click="setActiveImageModel(asImageModel(record).id)"
               >
                 {{ t("config.sections.setAsCurrent") }}
               </AButton>
-              <AButton size="small" @click="openEditImageModelModal(asImageModel(record))">
+              <AButton
+                size="small"
+                @click="openEditImageModelModal(asImageModel(record))"
+              >
                 {{ t("config.sections.editItem") }}
               </AButton>
-              <AButton danger size="small" @click="removeImageModel(asImageModel(record).id)">
+              <AButton
+                danger
+                size="small"
+                @click="removeImageModel(asImageModel(record).id)"
+              >
                 {{ t("common.delete") }}
               </AButton>
             </ASpace>
@@ -673,12 +905,17 @@ watch(
       </ATable>
     </section>
 
-    <section v-else-if="activeSection === 'llm-models'" class="panel panel--config">
+    <section
+      v-else-if="activeSection === 'llm-models'"
+      class="panel panel--config"
+    >
       <div class="config-panel-header">
         <div>
           <p class="eyebrow">{{ t("config.sections.customLlmEyebrow") }}</p>
           <h3 class="panel-title">{{ t("config.sections.customLlmTitle") }}</h3>
-          <p class="workspace-copy">{{ t("config.sections.customLlmDescription") }}</p>
+          <p class="workspace-copy">
+            {{ t("config.sections.customLlmDescription") }}
+          </p>
         </div>
         <AButton type="primary" @click="openCreateLlmModal">
           {{ t("config.sections.addCustomProvider") }}
@@ -723,10 +960,17 @@ watch(
               >
                 {{ t("config.sections.setAsCurrent") }}
               </AButton>
-              <AButton size="small" @click="openEditLlmModal(asLlmProvider(record))">
+              <AButton
+                size="small"
+                @click="openEditLlmModal(asLlmProvider(record))"
+              >
                 {{ t("config.sections.editItem") }}
               </AButton>
-              <AButton danger size="small" @click="removeCustomProvider(asLlmProvider(record).id)">
+              <AButton
+                danger
+                size="small"
+                @click="removeCustomProvider(asLlmProvider(record).id)"
+              >
                 {{ t("common.delete") }}
               </AButton>
             </ASpace>
@@ -738,9 +982,15 @@ watch(
     <section v-else class="panel panel--config">
       <div class="config-panel-header">
         <div>
-          <p class="eyebrow">{{ t("config.sections.publishPlatformsEyebrow") }}</p>
-          <h3 class="panel-title">{{ t("config.sections.publishPlatformsTitle") }}</h3>
-          <p class="workspace-copy">{{ t("config.sections.publishPlatformsDescription") }}</p>
+          <p class="eyebrow">
+            {{ t("config.sections.publishPlatformsEyebrow") }}
+          </p>
+          <h3 class="panel-title">
+            {{ t("config.sections.publishPlatformsTitle") }}
+          </h3>
+          <p class="workspace-copy">
+            {{ t("config.sections.publishPlatformsDescription") }}
+          </p>
         </div>
         <AButton type="primary" @click="openCreatePublishTargetModal">
           {{ t("config.sections.addPublishPlatform") }}
@@ -752,7 +1002,7 @@ watch(
         :columns="publishPlatformColumns"
         :data-source="publishTargets"
         :pagination="false"
-        :scroll="{ x: 1240 }"
+        :scroll="{ x: 1360 }"
         row-key="id"
       >
         <template #emptyText>
@@ -761,7 +1011,9 @@ watch(
 
         <template #bodyCell="{ column, record }">
           <template v-if="column.key === 'platform_type'">
-            {{ publishPlatformTypeLabel(asPublishTarget(record).platform_type) }}
+            {{
+              publishPlatformTypeLabel(asPublishTarget(record).platform_type)
+            }}
           </template>
 
           <template v-else-if="column.key === 'account_name'">
@@ -784,10 +1036,24 @@ watch(
 
           <template v-else-if="column.key === 'actions'">
             <ASpace wrap size="small">
-              <AButton size="small" @click="openEditPublishTargetModal(asPublishTarget(record))">
+              <AButton
+                size="small"
+                :loading="publishTargetOpeningId === asPublishTarget(record).id"
+                @click="openPublishTargetHomepage(asPublishTarget(record))"
+              >
+                {{ t("config.sections.openItem") }}
+              </AButton>
+              <AButton
+                size="small"
+                @click="openEditPublishTargetModal(asPublishTarget(record))"
+              >
                 {{ t("config.sections.editItem") }}
               </AButton>
-              <AButton danger size="small" @click="removePublishTarget(asPublishTarget(record).id)">
+              <AButton
+                danger
+                size="small"
+                @click="removePublishTarget(asPublishTarget(record).id)"
+              >
                 {{ t("common.delete") }}
               </AButton>
             </ASpace>
@@ -796,13 +1062,21 @@ watch(
       </ATable>
     </section>
 
-    <div v-if="configStore.lastMessage" class="banner banner-success">{{ configStore.lastMessage }}</div>
-    <div v-if="configStore.error" class="banner banner-error">{{ configStore.error }}</div>
+    <div v-if="configStore.lastMessage" class="banner banner-success">
+      {{ configStore.lastMessage }}
+    </div>
+    <div v-if="configStore.error" class="banner banner-error">
+      {{ configStore.error }}
+    </div>
   </section>
 
   <AModal
     v-model:open="imageModelModalOpen"
-    :title="imageModelEditId ? t('config.sections.editImageModel') : t('config.sections.addImageModel')"
+    :title="
+      imageModelEditId
+        ? t('config.sections.editImageModel')
+        : t('config.sections.addImageModel')
+    "
     :ok-text="t('common.save')"
     :cancel-text="t('common.cancel')"
     width="720px"
@@ -817,7 +1091,10 @@ watch(
         </AFormItem>
 
         <AFormItem :label="t('config.sections.providerType')">
-          <ASelect v-model:value="imageModelDraft.provider_type" :options="imageModelTypeOptions" />
+          <ASelect
+            v-model:value="imageModelDraft.provider_type"
+            :options="imageModelTypeOptions"
+          />
         </AFormItem>
 
         <AFormItem :label="t('config.sections.apiKey')">
@@ -837,7 +1114,11 @@ watch(
 
   <AModal
     v-model:open="llmModalOpen"
-    :title="llmEditId ? t('config.sections.editLlmModel') : t('config.sections.addCustomProvider')"
+    :title="
+      llmEditId
+        ? t('config.sections.editLlmModel')
+        : t('config.sections.addCustomProvider')
+    "
     :ok-text="t('common.save')"
     :cancel-text="t('common.cancel')"
     width="760px"
@@ -851,7 +1132,10 @@ watch(
           <AInput v-model:value="llmDraft.name" />
         </AFormItem>
 
-        <AFormItem class="config-form-grid__full" :label="t('config.sections.apiKey')">
+        <AFormItem
+          class="config-form-grid__full"
+          :label="t('config.sections.apiKey')"
+        >
           <AInput v-model:value="llmDraft.api_key" type="password" />
         </AFormItem>
 
@@ -864,11 +1148,19 @@ watch(
         </AFormItem>
 
         <AFormItem :label="t('config.sections.protocolType')">
-          <ASelect v-model:value="llmDraft.protocol_type" :options="llmProtocolOptions" />
+          <ASelect
+            v-model:value="llmDraft.protocol_type"
+            :options="llmProtocolOptions"
+          />
         </AFormItem>
 
         <AFormItem :label="t('config.sections.maxTokens')">
-          <AInputNumber v-model:value="llmDraft.max_tokens" :min="1" :precision="0" class="config-number-input" />
+          <AInputNumber
+            v-model:value="llmDraft.max_tokens"
+            :min="1"
+            :precision="0"
+            class="config-number-input"
+          />
         </AFormItem>
 
         <AFormItem :label="t('config.sections.enableProvider')">
@@ -880,7 +1172,11 @@ watch(
 
   <AModal
     v-model:open="publishTargetModalOpen"
-    :title="publishTargetEditId ? t('config.sections.editPublishPlatform') : t('config.sections.addPublishPlatform')"
+    :title="
+      publishTargetEditId
+        ? t('config.sections.editPublishPlatform')
+        : t('config.sections.addPublishPlatform')
+    "
     :ok-text="t('common.save')"
     :cancel-text="t('common.cancel')"
     width="980px"
@@ -895,7 +1191,10 @@ watch(
         </AFormItem>
 
         <AFormItem :label="t('config.sections.platformType')">
-          <ASelect v-model:value="publishTargetDraft.platform_type" :options="publishPlatformTypeOptions" />
+          <ASelect
+            v-model:value="publishTargetDraft.platform_type"
+            :options="publishPlatformTypeOptions"
+          />
         </AFormItem>
 
         <AFormItem :label="t('config.sections.accountName')">
@@ -906,7 +1205,10 @@ watch(
           <AInput v-model:value="publishTargetDraft.publish_url" />
         </AFormItem>
 
-        <AFormItem class="config-form-grid__full" :label="t('config.sections.cookies')">
+        <AFormItem
+          class="config-form-grid__full"
+          :label="t('config.sections.cookies')"
+        >
           <a-textarea v-model:value="publishTargetDraft.cookies" :rows="4" />
         </AFormItem>
 
@@ -916,7 +1218,7 @@ watch(
             :options="[
               { value: 'html', label: t('config.formats.html') },
               { value: 'md', label: t('config.formats.markdown') },
-              { value: 'txt', label: t('config.formats.text') }
+              { value: 'txt', label: t('config.formats.text') },
             ]"
           />
         </AFormItem>
@@ -976,21 +1278,36 @@ watch(
 
       <template v-if="publishTargetDraft.platform_type === 'wechat'">
         <div class="config-subsection">
-          <p class="config-subsection__eyebrow">{{ t("config.sections.wechatSettingsEyebrow") }}</p>
-          <h4 class="config-subsection__title">{{ t("config.sections.wechatSettingsTitle") }}</h4>
-          <p class="config-subsection__description">{{ t("config.sections.wechatSettingsDescription") }}</p>
+          <p class="config-subsection__eyebrow">
+            {{ t("config.sections.wechatSettingsEyebrow") }}
+          </p>
+          <h4 class="config-subsection__title">
+            {{ t("config.sections.wechatSettingsTitle") }}
+          </h4>
+          <p class="config-subsection__description">
+            {{ t("config.sections.wechatSettingsDescription") }}
+          </p>
         </div>
 
         <div class="config-form-grid">
           <AFormItem :label="t('config.sections.wechatCoverStrategy')">
-            <ASelect v-model:value="publishTargetDraft.wechat.cover_strategy" :options="wechatCoverStrategyOptions" />
+            <ASelect
+              v-model:value="publishTargetDraft.wechat.cover_strategy"
+              :options="wechatCoverStrategyOptions"
+            />
           </AFormItem>
 
           <AFormItem :label="t('config.sections.wechatCommentMode')">
-            <ASelect v-model:value="publishTargetDraft.wechat.comment_mode" :options="wechatCommentModeOptions" />
+            <ASelect
+              v-model:value="publishTargetDraft.wechat.comment_mode"
+              :options="wechatCommentModeOptions"
+            />
           </AFormItem>
 
-          <AFormItem class="config-form-grid__full" :label="t('config.sections.wechatCoverPath')">
+          <AFormItem
+            class="config-form-grid__full"
+            :label="t('config.sections.wechatCoverPath')"
+          >
             <AInput v-model:value="publishTargetDraft.wechat.cover_path" />
           </AFormItem>
 
@@ -1002,84 +1319,149 @@ watch(
             <AInput v-model:value="publishTargetDraft.wechat.source_label" />
           </AFormItem>
 
-          <AFormItem class="config-form-grid__full" :label="t('config.sections.wechatSourceUrl')">
+          <AFormItem
+            class="config-form-grid__full"
+            :label="t('config.sections.wechatSourceUrl')"
+          >
             <AInput v-model:value="publishTargetDraft.wechat.source_url" />
           </AFormItem>
         </div>
 
         <div class="config-toggle-grid">
           <AFormItem :label="t('config.sections.wechatDeclareOriginal')">
-            <ASwitch v-model:checked="publishTargetDraft.wechat.declare_original" />
+            <ASwitch
+              v-model:checked="publishTargetDraft.wechat.declare_original"
+            />
           </AFormItem>
           <AFormItem :label="t('config.sections.wechatEnableReward')">
-            <ASwitch v-model:checked="publishTargetDraft.wechat.enable_reward" />
+            <ASwitch
+              v-model:checked="publishTargetDraft.wechat.enable_reward"
+            />
           </AFormItem>
           <AFormItem :label="t('config.sections.wechatEnablePaid')">
             <ASwitch v-model:checked="publishTargetDraft.wechat.enable_paid" />
           </AFormItem>
-          <AFormItem :label="t('config.sections.wechatPlatformRecommendationEnabled')">
-            <ASwitch v-model:checked="publishTargetDraft.wechat.platform_recommendation_enabled" />
+          <AFormItem
+            :label="t('config.sections.wechatPlatformRecommendationEnabled')"
+          >
+            <ASwitch
+              v-model:checked="
+                publishTargetDraft.wechat.platform_recommendation_enabled
+              "
+            />
           </AFormItem>
         </div>
 
         <div class="config-subsection">
-          <p class="config-subsection__eyebrow">{{ t("config.sections.browserEnvironmentEyebrow") }}</p>
-          <h4 class="config-subsection__title">{{ t("config.sections.browserEnvironmentTitle") }}</h4>
-          <p class="config-subsection__description">{{ t("config.sections.browserEnvironmentDescription") }}</p>
+          <p class="config-subsection__eyebrow">
+            {{ t("config.sections.browserEnvironmentEyebrow") }}
+          </p>
+          <h4 class="config-subsection__title">
+            {{ t("config.sections.browserEnvironmentTitle") }}
+          </h4>
+          <p class="config-subsection__description">
+            {{ t("config.sections.browserEnvironmentDescription") }}
+          </p>
         </div>
 
         <template v-if="publishTargetEditId">
-          <div v-if="publishTargetBrowserMessage" class="browser-status browser-status--success">
+          <div
+            v-if="publishTargetBrowserMessage"
+            class="browser-status browser-status--success"
+          >
             {{ publishTargetBrowserMessage }}
           </div>
-          <div v-if="publishTargetBrowserError" class="browser-status browser-status--error">
+          <div
+            v-if="publishTargetBrowserError"
+            class="browser-status browser-status--error"
+          >
             {{ publishTargetBrowserError }}
           </div>
 
           <div class="browser-status-card">
             <div class="browser-status-grid">
               <div class="browser-status-item">
-                <span class="browser-status-item__label">{{ t("config.sections.browserRemoteVersion") }}</span>
-                <strong>{{ publishTargetBrowserStatus?.remote_version || "-" }}</strong>
+                <span class="browser-status-item__label">{{
+                  t("config.sections.browserRemoteVersion")
+                }}</span>
+                <strong>{{
+                  publishTargetBrowserStatus?.remote_version || "-"
+                }}</strong>
               </div>
               <div class="browser-status-item">
-                <span class="browser-status-item__label">{{ t("config.sections.browserLocalVersion") }}</span>
-                <strong>{{ publishTargetBrowserStatus?.local_version || "-" }}</strong>
+                <span class="browser-status-item__label">{{
+                  t("config.sections.browserLocalVersion")
+                }}</span>
+                <strong>{{
+                  publishTargetBrowserStatus?.local_version || "-"
+                }}</strong>
               </div>
               <div class="browser-status-item">
-                <span class="browser-status-item__label">{{ t("config.sections.browserReady") }}</span>
-                <strong>{{ publishTargetBrowserStatus?.browser_ready ? t("config.sections.providerActive") : t("config.sections.providerInactive") }}</strong>
+                <span class="browser-status-item__label">{{
+                  t("config.sections.browserReady")
+                }}</span>
+                <strong>{{
+                  publishTargetBrowserStatus?.browser_ready
+                    ? t("config.sections.providerActive")
+                    : t("config.sections.providerInactive")
+                }}</strong>
               </div>
               <div class="browser-status-item">
-                <span class="browser-status-item__label">{{ t("config.sections.browserProfileEntries") }}</span>
-                <strong>{{ publishTargetBrowserStatus?.profile_entry_count ?? 0 }}</strong>
+                <span class="browser-status-item__label">{{
+                  t("config.sections.browserProfileEntries")
+                }}</span>
+                <strong>{{
+                  publishTargetBrowserStatus?.profile_entry_count ?? 0
+                }}</strong>
               </div>
             </div>
 
             <div class="browser-status-paths">
               <div class="browser-status-path">
-                <span class="browser-status-item__label">{{ t("config.sections.browserExecutablePath") }}</span>
-                <code>{{ publishTargetBrowserStatus?.browser_executable || "-" }}</code>
+                <span class="browser-status-item__label">{{
+                  t("config.sections.browserExecutablePath")
+                }}</span>
+                <code>{{
+                  publishTargetBrowserStatus?.browser_executable || "-"
+                }}</code>
               </div>
               <div class="browser-status-path">
-                <span class="browser-status-item__label">{{ t("config.sections.browserProfilePath") }}</span>
-                <code>{{ publishTargetBrowserStatus?.profile_dir || "-" }}</code>
+                <span class="browser-status-item__label">{{
+                  t("config.sections.browserProfilePath")
+                }}</span>
+                <code>{{
+                  publishTargetBrowserStatus?.profile_dir || "-"
+                }}</code>
               </div>
               <div class="browser-status-path">
-                <span class="browser-status-item__label">{{ t("config.sections.browserConfigUrl") }}</span>
+                <span class="browser-status-item__label">{{
+                  t("config.sections.browserConfigUrl")
+                }}</span>
                 <code>{{ publishTargetBrowserStatus?.config_url || "-" }}</code>
               </div>
-              <div class="browser-status-path" v-if="publishTargetBrowserStatus?.remote_error">
-                <span class="browser-status-item__label">{{ t("config.sections.browserRemoteError") }}</span>
+              <div
+                class="browser-status-path"
+                v-if="publishTargetBrowserStatus?.remote_error"
+              >
+                <span class="browser-status-item__label">{{
+                  t("config.sections.browserRemoteError")
+                }}</span>
                 <code>{{ publishTargetBrowserStatus.remote_error }}</code>
               </div>
             </div>
 
             <div class="config-actions-bar">
-              <AButton :loading="publishTargetBrowserLoading" @click="loadPublishTargetBrowserStatus(publishTargetEditId)">
+              <AButton
+                :loading="publishTargetBrowserLoading"
+                @click="loadPublishTargetBrowserStatus(publishTargetEditId)"
+              >
                 {{ t("config.sections.refreshBrowserEnvironment") }}
               </AButton>
-              <AButton danger :loading="publishTargetBrowserLoading" @click="clearPublishTargetBrowserProfile">
+              <AButton
+                danger
+                :loading="publishTargetBrowserLoading"
+                @click="clearPublishTargetBrowserProfile"
+              >
                 {{ t("config.sections.clearBrowserProfile") }}
               </AButton>
             </div>

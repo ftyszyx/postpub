@@ -2,15 +2,20 @@ use std::{
     fs,
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use chrono::Utc;
-use postpub_types::BrowserEnvironmentStatus;
+use postpub_types::{BrowserEnvironmentStatus, PublishTargetConfig};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
-use crate::{AppPaths, PostpubError, Result};
+use crate::{
+    paths::{display_path, normalize_absolute_path},
+    publish::{AgentBrowserRuntime, BrowserRuntime},
+    AppPaths, PostpubError, Result,
+};
 
 const DEFAULT_BROWSER_CONFIG_URL: &str = "https://www.bytefuse.cn/clonerweibo.json";
 const BROWSER_MANIFEST_FILE: &str = "postpub-browser.json";
@@ -100,7 +105,7 @@ impl BrowserManager {
         let browser_executable = self
             .paths
             .embedded_browser_executable()
-            .map(|path| path.display().to_string());
+            .map(|path| display_path(&path));
         let browser_ready = browser_executable.is_some();
 
         let profile_dir = target_id.map(|target| browser_profile_dir(&self.paths, target));
@@ -119,15 +124,15 @@ impl BrowserManager {
             remote_version,
             remote_asset_url,
             remote_error,
-            browser_dir: self.paths.browser_dir().display().to_string(),
-            browser_profiles_dir: self.paths.browser_profiles_dir().display().to_string(),
-            manifest_path: manifest_path.display().to_string(),
+            browser_dir: display_path(&self.paths.browser_dir()),
+            browser_profiles_dir: display_path(&browser_profile_root(&self.paths)),
+            manifest_path: display_path(&manifest_path),
             local_version: local_manifest
                 .as_ref()
                 .map(|manifest| manifest.chrome_version.clone()),
             browser_executable,
             browser_ready,
-            profile_dir: profile_dir.map(|dir| dir.display().to_string()),
+            profile_dir: profile_dir.map(|dir| display_path(&dir)),
             profile_exists,
             profile_entry_count,
         })
@@ -140,6 +145,28 @@ impl BrowserManager {
             fs::remove_dir_all(&profile_dir)?;
         }
         fs::create_dir_all(&profile_dir)?;
+        Ok(profile_dir)
+    }
+
+    pub async fn open_target_homepage(&self, target: &PublishTargetConfig) -> Result<PathBuf> {
+        self.paths.ensure_directories()?;
+
+        let browser_executable = self.ensure_browser_executable().await?;
+        let profile_dir = browser_profile_dir(&self.paths, &target.id);
+        fs::create_dir_all(&profile_dir)?;
+
+        let runtime = AgentBrowserRuntime::new(
+            manual_browser_session_name(target),
+            Some(browser_executable),
+            Some(profile_dir.clone()),
+        );
+        let homepage = publish_target_homepage(target)?;
+        if let Err(error) = runtime.open_with_timeout_ms(&homepage, 10_000).await {
+            if !open_timeout_can_be_treated_as_success(&error, &profile_dir).await {
+                return Err(error);
+            }
+        }
+
         Ok(profile_dir)
     }
 
@@ -278,9 +305,10 @@ struct EmbeddedBrowserManifest {
 }
 
 pub fn browser_profile_dir(paths: &AppPaths, target_id: &str) -> PathBuf {
-    paths
-        .browser_profiles_dir()
-        .join(sanitize_profile_component(target_id))
+    normalize_absolute_path(
+        browser_profile_root(paths)
+            .join(sanitize_profile_component(target_id_or_default(target_id))),
+    )
 }
 
 pub fn sanitize_profile_component(value: &str) -> String {
@@ -305,6 +333,73 @@ pub fn sanitize_profile_component(value: &str) -> String {
     } else {
         normalized
     }
+}
+
+fn browser_profile_root(paths: &AppPaths) -> PathBuf {
+    if let Ok(value) = std::env::var("POSTPUB_BROWSER_PROFILE_ROOT") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return normalize_absolute_path(trimmed);
+        }
+    }
+
+    normalize_absolute_path(paths.browser_profiles_dir())
+}
+
+fn target_id_or_default(target_id: &str) -> &str {
+    let trimmed = target_id.trim();
+    if trimmed.is_empty() {
+        "default"
+    } else {
+        trimmed
+    }
+}
+
+fn manual_browser_session_name(target: &PublishTargetConfig) -> String {
+    format!(
+        "{}-manual-{}",
+        browser_session_prefix(target),
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+fn browser_session_prefix(target: &PublishTargetConfig) -> String {
+    format!(
+        "postpub-{}-{}",
+        target.platform_type.trim(),
+        sanitize_profile_component(target_id_or_default(&target.id))
+    )
+}
+
+fn publish_target_homepage(target: &PublishTargetConfig) -> Result<String> {
+    let raw_url = if target.publish_url.trim().is_empty() {
+        match target.platform_type.trim() {
+            "wechat" => "https://mp.weixin.qq.com".to_string(),
+            platform_type => {
+                return Err(PostpubError::Validation(format!(
+                    "publish url is empty for platform type '{platform_type}'"
+                )))
+            }
+        }
+    } else {
+        target.publish_url.trim().to_string()
+    };
+
+    let parsed = url::Url::parse(&raw_url).map_err(|error| {
+        PostpubError::Validation(format!(
+            "invalid publish url for target '{}': {error}",
+            target_id_or_default(&target.id)
+        ))
+    })?;
+
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(PostpubError::Validation(format!(
+            "publish url for target '{}' must use http or https: {raw_url}",
+            target_id_or_default(&target.id)
+        )));
+    }
+
+    Ok(parsed.to_string())
 }
 
 fn unpack_zip(bytes: &[u8], target_dir: &Path) -> Result<()> {
@@ -382,6 +477,18 @@ fn count_profile_entries(path: &Path) -> Result<usize> {
     Ok(fs::read_dir(path)?.filter_map(|entry| entry.ok()).count())
 }
 
+async fn open_timeout_can_be_treated_as_success(error: &PostpubError, profile_dir: &Path) -> bool {
+    if !matches!(error, PostpubError::External(message) if message.contains("agent-browser command timed out after") && message.contains("open "))
+    {
+        return false;
+    }
+
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    count_profile_entries(profile_dir)
+        .map(|count| count > 0)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Write};
@@ -390,8 +497,11 @@ mod tests {
     use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
 
-    use super::{find_browser_executable_in_dir, unpack_zip};
+    use super::{
+        browser_profile_dir, find_browser_executable_in_dir, publish_target_homepage, unpack_zip,
+    };
     use crate::AppContext;
+    use postpub_types::PublishTargetConfig;
 
     #[test]
     fn extracts_zip_and_finds_browser_executable() {
@@ -430,5 +540,34 @@ mod tests {
             .expect("sync browser");
 
         assert!(executable.is_file());
+    }
+
+    #[test]
+    fn browser_profile_dir_is_absolute_and_normalized() {
+        let temp = tempdir().expect("temp dir");
+        let paths = crate::AppPaths::from_root(temp.path().join("runtime").join("..").join("app"));
+        let profile_dir = browser_profile_dir(&paths, "wechat target");
+
+        assert!(profile_dir.is_absolute());
+        assert!(
+            !profile_dir.to_string_lossy().contains(".."),
+            "profile dir should not contain parent segments"
+        );
+        assert!(profile_dir.ends_with(
+            std::path::Path::new("runtime")
+                .join("profiles")
+                .join("wechat-target")
+        ));
+    }
+
+    #[test]
+    fn publish_target_homepage_falls_back_to_wechat_homepage() {
+        let target = PublishTargetConfig {
+            publish_url: String::new(),
+            ..PublishTargetConfig::default()
+        };
+
+        let url = publish_target_homepage(&target).expect("fallback publish url");
+        assert_eq!(url, "https://mp.weixin.qq.com/");
     }
 }

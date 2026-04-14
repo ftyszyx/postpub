@@ -9,13 +9,21 @@ import {
   Space as ASpace,
   Table as ATable,
   Tag as ATag,
-  message
+  message,
 } from "ant-design-vue";
-import { EyeOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons-vue";
+import {
+  EyeOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+} from "@ant-design/icons-vue";
 import { useRoute } from "vue-router";
 import { useI18n } from "vue-i18n";
 import { usePublishStore } from "../stores/publish";
-import type { PublishEvent, PublishTaskStatus, PublishTaskSummary } from "../types/postpub";
+import type {
+  PublishEvent,
+  PublishTaskStatus,
+  PublishTaskSummary,
+} from "../types/postpub";
 
 type EventDisplayState = "pending" | "current" | "completed" | "failed";
 type DisplayEvent = PublishEvent & {
@@ -24,7 +32,7 @@ type DisplayEvent = PublishEvent & {
 
 const publishStore = usePublishStore();
 const route = useRoute();
-const { t } = useI18n();
+const { t, te } = useI18n();
 
 const searchKeyword = ref("");
 const detailOpen = ref(false);
@@ -34,14 +42,18 @@ const retryingTaskId = ref("");
 const detailTask = computed(
   () =>
     publishStore.tasks.find((task) => task.id === selectedTaskId.value) ||
-    (publishStore.current?.id === selectedTaskId.value ? publishStore.current : null)
+    (publishStore.current?.id === selectedTaskId.value
+      ? publishStore.current
+      : null),
 );
-const orderedEvents = computed(() => [...(detailTask.value?.events ?? [])].reverse());
+const orderedEvents = computed(() =>
+  [...(detailTask.value?.events ?? [])].reverse(),
+);
 const displayEvents = computed<DisplayEvent[]>(() => {
   const taskStatus = detailTask.value?.status;
   return orderedEvents.value.map((event, index) => ({
     ...event,
-    displayState: resolveEventDisplayState(event, index, taskStatus)
+    displayState: resolveEventDisplayState(event, index, taskStatus),
   }));
 });
 const currentEvent = computed(() => displayEvents.value[0] ?? null);
@@ -51,7 +63,11 @@ function asTask(record: unknown) {
 }
 
 function taskTitle(task: PublishTaskSummary) {
-  return task.output?.article_title || task.request.article_relative_path || t("common.untitledTask");
+  return (
+    task.output?.article_title ||
+    task.request.article_relative_path ||
+    t("common.untitledTask")
+  );
 }
 
 function targetLabel(task: PublishTaskSummary) {
@@ -63,7 +79,11 @@ function statusLabel(status?: PublishTaskStatus) {
 }
 
 function modeLabel(task: PublishTaskSummary) {
-  const mode = (task.output?.mode || task.request.mode || "draft").toLowerCase();
+  const mode = (
+    task.output?.mode ||
+    task.request.mode ||
+    "draft"
+  ).toLowerCase();
   if (mode === "draft" || mode === "publish") {
     return t(`publish.modes.${mode}`);
   }
@@ -79,15 +99,50 @@ function stageLabel(stage: string) {
     "platform",
     "finalize",
     "done",
-    "failed"
+    "failed",
   ]);
-  return knownStages.has(stage) ? t(`publish.stages.${stage}`) : t("publish.stages.unknown", { stage });
+  if (knownStages.has(stage)) {
+    return t(`publish.stages.${stage}`);
+  }
+
+  if (stage.includes(".")) {
+    return formatScopedStageLabel(stage);
+  }
+
+  return t("publish.stages.unknown", { stage });
+}
+
+function formatScopedStageLabel(stage: string) {
+  const segmentKeys: Record<string, string> = {
+    wechat: "config.sections.publishPlatformTypeWechat",
+    browser: "config.sections.browserEnvironmentEyebrow",
+    settings: "config.sections.wechatSettingsSummary",
+    prepare: "publish.stages.prepare",
+    target: "publish.stages.target",
+    save: "common.save",
+    done: "publish.stages.done",
+    mode: "common.mode",
+    close: "common.close",
+  };
+
+  return stage
+    .split(".")
+    .filter(Boolean)
+    .map((segment) => {
+      const key = segmentKeys[segment];
+      if (key && te(key)) {
+        return t(key);
+      }
+
+      return segment.replace(/_/g, " ");
+    })
+    .join(" / ");
 }
 
 function resolveEventDisplayState(
   event: PublishEvent,
   index: number,
-  taskStatus?: PublishTaskStatus
+  taskStatus?: PublishTaskStatus,
 ): EventDisplayState {
   if (index === 0) {
     if (taskStatus === "Failed" || event.stage === "failed") return "failed";
@@ -128,7 +183,7 @@ function taskSearchText(task: PublishTaskSummary) {
     task.request.article_relative_path,
     task.request.target_id,
     statusLabel(task.status),
-    modeLabel(task)
+    modeLabel(task),
   ]
     .join(" ")
     .toLowerCase();
@@ -137,7 +192,9 @@ function taskSearchText(task: PublishTaskSummary) {
 const filteredTasks = computed(() => {
   const keyword = searchKeyword.value.trim().toLowerCase();
   if (!keyword) return publishStore.tasks;
-  return publishStore.tasks.filter((task) => taskSearchText(task).includes(keyword));
+  return publishStore.tasks.filter((task) =>
+    taskSearchText(task).includes(keyword),
+  );
 });
 
 const tableColumns = computed(() => [
@@ -145,13 +202,13 @@ const tableColumns = computed(() => [
     title: t("publish.fields.article"),
     key: "article",
     dataIndex: "request.article_relative_path",
-    ellipsis: true
+    ellipsis: true,
   },
   {
     title: t("publish.fields.target"),
     key: "target",
     width: 180,
-    ellipsis: true
+    ellipsis: true,
   },
   { title: t("common.status"), key: "status", width: 120 },
   { title: t("common.mode"), key: "mode", width: 120 },
@@ -159,14 +216,14 @@ const tableColumns = computed(() => [
     title: t("common.updatedAt"),
     key: "updated_at",
     dataIndex: "updated_at",
-    width: 220
+    width: 220,
   },
   {
     title: t("common.actions"),
     key: "actions",
     width: 180,
-    fixed: "right" as const
-  }
+    fixed: "right" as const,
+  },
 ]);
 
 function openTaskDetail(task: PublishTaskSummary) {
@@ -196,7 +253,7 @@ async function retryTask(task: PublishTaskSummary) {
 function taskRowProps(task: PublishTaskSummary) {
   return {
     onClick: () => openTaskDetail(task),
-    style: "cursor: pointer;"
+    style: "cursor: pointer;",
   };
 }
 
@@ -221,7 +278,7 @@ watch(
   () => route.query.task,
   async () => {
     await openTaskFromRoute();
-  }
+  },
 );
 
 onBeforeUnmount(() => {
@@ -297,7 +354,11 @@ onBeforeUnmount(() => {
 
           <template v-else-if="column.key === 'actions'">
             <ASpace>
-              <AButton type="link" size="small" @click.stop="openTaskDetail(asTask(record))">
+              <AButton
+                type="link"
+                size="small"
+                @click.stop="openTaskDetail(asTask(record))"
+              >
                 <template #icon>
                   <EyeOutlined />
                 </template>
@@ -384,14 +445,19 @@ onBeforeUnmount(() => {
               <div class="info-row">
                 <span>{{ t("publish.outputState") }}</span>
                 <strong>{{
-                  detailTask.output ? t("publish.outputReady") : t("publish.outputMissing")
+                  detailTask.output
+                    ? t("publish.outputReady")
+                    : t("publish.outputMissing")
                 }}</strong>
               </div>
             </div>
           </ACard>
         </div>
 
-        <div v-if="detailTask.error" class="banner banner-error task-modal-banner">
+        <div
+          v-if="detailTask.error"
+          class="banner banner-error task-modal-banner"
+        >
           {{ detailTask.error }}
         </div>
 
@@ -400,11 +466,16 @@ onBeforeUnmount(() => {
             <div v-if="currentEvent" class="task-current-step">
               <div class="task-event-list__header">
                 <strong>{{ stageLabel(currentEvent.stage) }}</strong>
-                <ATag class="task-table-tag" :color="eventStateColor(currentEvent.displayState)">
+                <ATag
+                  class="task-table-tag"
+                  :color="eventStateColor(currentEvent.displayState)"
+                >
                   {{ eventStateLabel(currentEvent.displayState) }}
                 </ATag>
               </div>
-              <p class="task-current-step__message">{{ currentEvent.message }}</p>
+              <p class="task-current-step__message">
+                {{ currentEvent.message }}
+              </p>
               <small>{{ currentEvent.timestamp }}</small>
             </div>
             <AEmpty v-else :description="t('publish.currentStepEmpty')" />
@@ -420,7 +491,10 @@ onBeforeUnmount(() => {
               >
                 <div class="task-event-list__header">
                   <strong>{{ stageLabel(event.stage) }}</strong>
-                  <ATag class="task-table-tag" :color="eventStateColor(event.displayState)">
+                  <ATag
+                    class="task-table-tag"
+                    :color="eventStateColor(event.displayState)"
+                  >
                     {{ eventStateLabel(event.displayState) }}
                   </ATag>
                 </div>
@@ -526,7 +600,9 @@ onBeforeUnmount(() => {
 
 .event-card {
   border-left: 4px solid transparent;
-  transition: border-color 0.2s ease, background-color 0.2s ease;
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease;
 }
 
 .event-card--current {
