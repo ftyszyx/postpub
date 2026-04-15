@@ -127,6 +127,8 @@ fn repair_postpub_config(config: &mut PostpubConfig) -> bool {
         changed |= repair_string(&mut target.template_category);
         changed |= repair_string(&mut target.template_name);
         changed |= repair_string(&mut target.wechat.source_label);
+        changed |= repair_wechat_cover_size(&mut target.wechat.cover_width, 900);
+        changed |= repair_wechat_cover_size(&mut target.wechat.cover_height, 383);
     }
 
     changed
@@ -149,6 +151,15 @@ fn repair_string(value: &mut String) -> bool {
     };
 
     *value = repaired;
+    true
+}
+
+fn repair_wechat_cover_size(value: &mut u32, default_value: u32) -> bool {
+    if *value != 0 {
+        return false;
+    }
+
+    *value = default_value;
     true
 }
 
@@ -227,6 +238,29 @@ mod tests {
 
         let persisted = fs::read_to_string(ui_config_file).expect("read normalized ui config");
         assert!(persisted.contains("\"max_tokens\": 131072"));
+    }
+
+    #[test]
+    fn repairs_wechat_cover_size_when_zero() {
+        let temp = tempdir().expect("temp dir");
+        let store = ConfigStore::new(AppPaths::from_root(temp.path().to_path_buf()));
+
+        store.ensure_defaults().expect("bootstrap defaults");
+
+        let mut config = store.load_config().expect("load defaults");
+        config.publish_targets[0].wechat.cover_width = 0;
+        config.publish_targets[0].wechat.cover_height = 0;
+
+        let config_file = AppPaths::from_root(temp.path().to_path_buf()).config_file();
+        fs::write(
+            &config_file,
+            serde_yaml::to_string(&config).expect("serialize config"),
+        )
+        .expect("write config");
+
+        let loaded = store.load_config().expect("load normalized config");
+        assert_eq!(loaded.publish_targets[0].wechat.cover_width, 900);
+        assert_eq!(loaded.publish_targets[0].wechat.cover_height, 383);
     }
 
     fn latin1_mojibake(value: &str) -> String {

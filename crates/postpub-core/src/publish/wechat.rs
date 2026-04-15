@@ -243,13 +243,7 @@ impl Publisher for WechatPublisher {
             format!("using agent-browser session {}", runtime.session_name()),
         );
         let publish_result = self
-            .publish_with_runtime(
-                &runtime,
-                target,
-                &plan,
-                request,
-                reporter,
-            )
+            .publish_with_runtime(&runtime, target, &plan, request, reporter)
             .await;
 
         reporter.report("wechat.browser.close", "closing agent-browser session");
@@ -691,8 +685,12 @@ fn resolve_wechat_cover_request(
     let body_has_image = html_contains_image(body_html);
 
     let plan = match target.wechat.cover_strategy.trim() {
-        "custom_path" => WechatCoverPlan::Upload(resolve_wechat_cover_path(context, target, article)?),
-        "article_cover" => WechatCoverPlan::Upload(resolve_wechat_cover_path(context, target, article)?),
+        "custom_path" => {
+            WechatCoverPlan::Upload(resolve_wechat_cover_path(context, target, article)?)
+        }
+        "article_cover" => {
+            WechatCoverPlan::Upload(resolve_wechat_cover_path(context, target, article)?)
+        }
         "first_image" if body_has_image => WechatCoverPlan::BodyFirstImage,
         "first_image" => {
             return Err(PostpubError::Validation(
@@ -971,9 +969,11 @@ async fn apply_wechat_cover<R: BrowserRuntime>(
     match &cover.plan {
         WechatCoverPlan::Upload(path) => upload_wechat_cover_file(runtime, path).await?,
         WechatCoverPlan::BodyFirstImage => {
-            select_wechat_cover_from_article(runtime, cover.size).await?
+            select_wechat_cover_from_article_with_size(runtime, cover.size).await?
         }
-        WechatCoverPlan::PlatformAi => select_wechat_cover_with_ai(runtime, cover.size).await?,
+        WechatCoverPlan::PlatformAi => {
+            select_wechat_cover_with_ai_with_size(runtime, cover.size).await?
+        }
     }
 
     wait_for_wechat_cover_preview(runtime, Duration::from_secs(20)).await?;
@@ -1453,6 +1453,76 @@ async fn select_wechat_cover_with_ai<R: BrowserRuntime>(
     click_first_wechat_cover_candidate(runtime).await
 }
 
+async fn select_wechat_cover_from_article_with_size<R: BrowserRuntime>(
+    runtime: &R,
+    cover_size: WechatCoverSize,
+) -> Result<()> {
+    let _ = choose_wechat_cover_size(runtime, cover_size).await;
+    select_wechat_cover_from_article(runtime, cover_size).await
+}
+
+async fn select_wechat_cover_with_ai_with_size<R: BrowserRuntime>(
+    runtime: &R,
+    cover_size: WechatCoverSize,
+) -> Result<()> {
+    let _ = choose_wechat_cover_size(runtime, cover_size).await;
+    select_wechat_cover_with_ai(runtime, cover_size).await
+}
+
+async fn choose_wechat_cover_size<R: BrowserRuntime>(
+    runtime: &R,
+    cover_size: WechatCoverSize,
+) -> Result<bool> {
+    let ratio_text = format!("{}:{}", cover_size.width, cover_size.height);
+    let width = cover_size.width;
+    let height = cover_size.height;
+    let script = format!(
+        r#"
+(() => {{
+  const expectedRatio = "{ratio_text}";
+  const expectedX = "{width}x{height}";
+  const expectedMultiply = "{width}×{height}";
+  const normalize = (input) => (input || "").replace(/\s+/g, "").trim().toLowerCase();
+  const isVisible = (node) => {{
+    if (!node) {{
+      return false;
+    }}
+    const rect = node.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {{
+      return false;
+    }}
+    const style = getComputedStyle(node);
+    return style.display !== "none" && style.visibility !== "hidden";
+  }};
+  const nodes = Array.from(document.querySelectorAll("button, label, li, div, span, a"));
+  const deduped = nodes
+    .map((node) => node.closest("button, label, li, a, [role='button']") || node)
+    .filter((node, index, all) => all.indexOf(node) === index);
+  const candidate = deduped.find((node) => {{
+    if (!isVisible(node)) {{
+      return false;
+    }}
+    const text = normalize(node.innerText || node.textContent || "");
+    return text.includes(expectedRatio) || text.includes(expectedX) || text.includes(expectedMultiply);
+  }});
+  if (!candidate) {{
+    return false;
+  }}
+  candidate.scrollIntoView({{ block: "center", inline: "center" }});
+  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {{
+    candidate.dispatchEvent(new MouseEvent(type, {{ bubbles: true, cancelable: true, view: window }}));
+  }}
+  if (typeof candidate.click === "function") {{
+    candidate.click();
+  }}
+  return true;
+}})()
+"#,
+    );
+
+    evaluate_bool(runtime, &script).await
+}
+
 async fn wait_for_wechat_cover_candidates<R: BrowserRuntime>(
     runtime: &R,
     timeout: Duration,
@@ -1615,7 +1685,8 @@ async fn wait_for_wechat_dashboard_state<R: BrowserRuntime>(
             last_url = current_url.clone();
         }
 
-        if looks_like_wechat_url(&current_url) && evaluate_bool(runtime, dashboard_ready_script).await?
+        if looks_like_wechat_url(&current_url)
+            && evaluate_bool(runtime, dashboard_ready_script).await?
         {
             return Ok(current_url);
         }
@@ -1939,7 +2010,11 @@ mod tests {
         let result = resolve_wechat_cover_size(&target);
 
         assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("invalid wechat cover size"));
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("invalid wechat cover size"));
     }
 
     #[tokio::test]
