@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Button as AButton,
   Card as ACard,
@@ -12,6 +12,7 @@ import {
   message,
 } from "ant-design-vue";
 import {
+  DeleteOutlined,
   EyeOutlined,
   ReloadOutlined,
   SearchOutlined,
@@ -30,7 +31,11 @@ const { t } = useI18n();
 const searchKeyword = ref("");
 const detailOpen = ref(false);
 const selectedTaskId = ref("");
+const selectedTaskIds = ref<string[]>([]);
+const deletingTaskIds = ref<string[]>([]);
+const batchDeleting = ref(false);
 const retryingTaskId = ref("");
+const tablePageSize = ref(20);
 
 const detailTask = computed(
   () =>
@@ -57,9 +62,39 @@ const displayEvents = computed<DisplayEvent[]>(() => {
 });
 const currentEvent = computed(() => displayEvents.value[0] ?? null);
 const sourceSummaries = computed(() => detailTask.value?.output?.sources ?? []);
+const selectedTasks = computed(() =>
+  generationStore.tasks.filter((task) => selectedTaskIds.value.includes(task.id)),
+);
+const deletableSelectedTasks = computed(() =>
+  selectedTasks.value.filter(canDeleteTask),
+);
+const rowSelection = computed(() => ({
+  selectedRowKeys: selectedTaskIds.value,
+  onChange: (keys: Array<string | number>) => {
+    selectedTaskIds.value = keys.map((key) => String(key));
+  },
+  getCheckboxProps: (record: GenerationTaskSummary) => ({
+    disabled: !canDeleteTask(record),
+  }),
+}));
+const tablePagination = computed(() => ({
+  pageSize: tablePageSize.value,
+  showSizeChanger: true,
+  pageSizeOptions: ["20", "50", "100"],
+  onShowSizeChange: (_current: number, size: number) => {
+    tablePageSize.value = size;
+  },
+  onChange: (_page: number, size: number) => {
+    tablePageSize.value = size;
+  },
+}));
 
 function asTask(record: unknown) {
   return record as GenerationTaskSummary;
+}
+
+function canDeleteTask(task: GenerationTaskSummary) {
+  return task.status === "Succeeded" || task.status === "Failed";
 }
 
 function taskTitle(task: GenerationTaskSummary) {
@@ -180,7 +215,7 @@ const tableColumns = computed(() => [
   {
     title: t("common.actions"),
     key: "actions",
-    width: 180,
+    width: 260,
     fixed: "right" as const,
   },
 ]);
@@ -213,9 +248,110 @@ async function retryTask(task: GenerationTaskSummary) {
   message.success(t("generation.retryTaskSuccess"));
 }
 
+function isDeletingTask(taskId: string) {
+  return deletingTaskIds.value.includes(taskId);
+}
+
+function markDeletingTasks(taskIds: string[]) {
+  deletingTaskIds.value = [...new Set([...deletingTaskIds.value, ...taskIds])];
+}
+
+function unmarkDeletingTasks(taskIds: string[]) {
+  const deleted = new Set(taskIds);
+  deletingTaskIds.value = deletingTaskIds.value.filter((taskId) => !deleted.has(taskId));
+}
+
+function syncTaskSelectionAfterDelete(taskIds: string[]) {
+  const deleted = new Set(taskIds);
+  selectedTaskIds.value = selectedTaskIds.value.filter((taskId) => !deleted.has(taskId));
+  if (selectedTaskId.value && deleted.has(selectedTaskId.value)) {
+    closeTaskDetail();
+  }
+}
+
+async function performDeleteTasks(tasks: GenerationTaskSummary[]) {
+  const taskIds = tasks.map((task) => task.id);
+  if (!taskIds.length) {
+    return [];
+  }
+
+  markDeletingTasks(taskIds);
+  if (taskIds.length > 1) {
+    batchDeleting.value = true;
+  }
+
+  try {
+    const deletedIds =
+      taskIds.length === 1
+        ? ((await generationStore.deleteTask(taskIds[0])) ? taskIds : [])
+        : await generationStore.deleteTasks(taskIds);
+    syncTaskSelectionAfterDelete(deletedIds);
+    return deletedIds;
+  } finally {
+    unmarkDeletingTasks(taskIds);
+    batchDeleting.value = false;
+  }
+}
+
+function confirmDeleteTask(task: GenerationTaskSummary) {
+  AModal.confirm({
+    title: t("generation.deleteTaskTitle"),
+    content: t("generation.deleteTaskPrompt", {
+      title: taskTitle(task),
+    }),
+    okText: t("common.delete"),
+    cancelText: t("common.cancel"),
+    okButtonProps: { danger: true },
+    onOk: async () => {
+      const deletedIds = await performDeleteTasks([task]);
+      if (deletedIds.length) {
+        message.success(t("generation.deleteTaskSuccess"));
+      }
+    },
+  });
+}
+
+function confirmDeleteSelectedTasks() {
+  const tasks = deletableSelectedTasks.value;
+  if (!tasks.length) {
+    return;
+  }
+
+  AModal.confirm({
+    title: t("generation.batchDeleteTitle"),
+    content: t("generation.batchDeletePrompt", {
+      count: tasks.length,
+    }),
+    okText: t("common.delete"),
+    cancelText: t("common.cancel"),
+    okButtonProps: { danger: true },
+    onOk: async () => {
+      const deletedIds = await performDeleteTasks(tasks);
+      if (deletedIds.length) {
+        message.success(
+          t("generation.batchDeleteTaskSuccess", {
+            count: deletedIds.length,
+          }),
+        );
+      }
+    },
+  });
+}
+
 function taskRowProps(task: GenerationTaskSummary) {
   return {
-    onClick: () => openTaskDetail(task),
+    onClick: (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.closest(".ant-table-selection-column") ||
+        target?.closest("button") ||
+        target?.closest("a")
+      ) {
+        return;
+      }
+
+      openTaskDetail(task);
+    },
     style: "cursor: pointer;",
   };
 }
@@ -225,6 +361,19 @@ onMounted(async () => {
     await generationStore.loadTasks();
   }
 });
+
+watch(
+  () => generationStore.tasks.map((task) => task.id),
+  (taskIds) => {
+    const activeIds = new Set(taskIds);
+    selectedTaskIds.value = selectedTaskIds.value.filter((taskId) =>
+      activeIds.has(taskId),
+    );
+    if (selectedTaskId.value && !activeIds.has(selectedTaskId.value)) {
+      closeTaskDetail();
+    }
+  },
+);
 
 onBeforeUnmount(() => {
   generationStore.dispose();
@@ -239,24 +388,50 @@ onBeforeUnmount(() => {
 
     <ACard :title="t('generation.taskListTitle')" class="task-status-card">
       <template #extra>
-        <AInput
-          v-model:value="searchKeyword"
-          :placeholder="t('generation.taskSearchPlaceholder')"
-          allow-clear
-          class="task-search-input"
-        >
-          <template #prefix>
-            <SearchOutlined />
-          </template>
-        </AInput>
+        <div class="task-toolbar">
+          <AInput
+            v-model:value="searchKeyword"
+            :placeholder="t('generation.taskSearchPlaceholder')"
+            allow-clear
+            class="task-search-input"
+          >
+            <template #prefix>
+              <SearchOutlined />
+            </template>
+          </AInput>
+          <ASpace>
+            <span
+              v-if="selectedTaskIds.length"
+              class="task-selection-hint"
+            >
+              {{
+                t("generation.selectedCount", {
+                  count: selectedTaskIds.length,
+                })
+              }}
+            </span>
+            <AButton
+              danger
+              :disabled="!deletableSelectedTasks.length"
+              :loading="batchDeleting"
+              @click="confirmDeleteSelectedTasks"
+            >
+              <template #icon>
+                <DeleteOutlined />
+              </template>
+              {{ t("generation.batchDelete") }}
+            </AButton>
+          </ASpace>
+        </div>
       </template>
 
       <ATable
         :columns="tableColumns"
         :data-source="filteredTasks"
-        :pagination="{ pageSize: 8, showSizeChanger: false }"
-        :scroll="{ x: 1100 }"
+        :pagination="tablePagination"
+        :scroll="{ x: 1240 }"
         row-key="id"
+        :row-selection="rowSelection"
         :custom-row="taskRowProps"
       >
         <template #emptyText>
@@ -319,6 +494,18 @@ onBeforeUnmount(() => {
                   <ReloadOutlined />
                 </template>
                 {{ t("generation.retryTask") }}
+              </AButton>
+              <AButton
+                v-if="canDeleteTask(asTask(record))"
+                danger
+                size="small"
+                :loading="isDeletingTask(asTask(record).id)"
+                @click.stop="confirmDeleteTask(asTask(record))"
+              >
+                <template #icon>
+                  <DeleteOutlined />
+                </template>
+                {{ t("common.delete") }}
               </AButton>
             </ASpace>
           </template>
@@ -475,6 +662,17 @@ onBeforeUnmount(() => {
         <ASpace>
           <AButton @click="closeTaskDetail">{{ t("common.close") }}</AButton>
           <AButton
+            v-if="detailTask && canDeleteTask(detailTask)"
+            danger
+            :loading="isDeletingTask(detailTask.id)"
+            @click="confirmDeleteTask(detailTask)"
+          >
+            <template #icon>
+              <DeleteOutlined />
+            </template>
+            {{ t("common.delete") }}
+          </AButton>
+          <AButton
             v-if="detailTask?.status === 'Failed'"
             danger
             :loading="retryingTaskId === detailTask.id"
@@ -511,6 +709,19 @@ onBeforeUnmount(() => {
 
 .task-search-input {
   width: min(420px, 100%);
+}
+
+.task-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.task-selection-hint {
+  color: var(--ink-faint);
+  white-space: nowrap;
 }
 
 .task-table-topic {
@@ -625,6 +836,11 @@ onBeforeUnmount(() => {
 
   .task-search-input {
     width: 100%;
+  }
+
+  .task-toolbar {
+    width: 100%;
+    justify-content: stretch;
   }
 
   .task-source-item__header,

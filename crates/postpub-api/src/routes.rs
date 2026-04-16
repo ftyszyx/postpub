@@ -28,6 +28,11 @@ pub struct BrowserStatusQuery {
     target_id: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct DeleteTasksRequest {
+    ids: Vec<String>,
+}
+
 pub fn api_router() -> Router<ApiState> {
     Router::new()
         .route("/api/system/health", get(health))
@@ -75,7 +80,14 @@ pub fn api_router() -> Router<ApiState> {
             "/api/generation/tasks",
             get(list_generation_tasks).post(create_generation_task),
         )
-        .route("/api/generation/tasks/{task_id}", get(get_generation_task))
+        .route(
+            "/api/generation/tasks/actions/delete",
+            post(delete_generation_tasks),
+        )
+        .route(
+            "/api/generation/tasks/{task_id}",
+            get(get_generation_task).delete(delete_generation_task),
+        )
         .route(
             "/api/generation/tasks/{task_id}/retry",
             post(retry_generation_task),
@@ -88,7 +100,14 @@ pub fn api_router() -> Router<ApiState> {
             "/api/publish/tasks",
             get(list_publish_tasks).post(create_publish_task),
         )
-        .route("/api/publish/tasks/{task_id}", get(get_publish_task))
+        .route(
+            "/api/publish/tasks/actions/delete",
+            post(delete_publish_tasks),
+        )
+        .route(
+            "/api/publish/tasks/{task_id}",
+            get(get_publish_task).delete(delete_publish_task),
+        )
         .route(
             "/api/publish/tasks/{task_id}/retry",
             post(retry_publish_task),
@@ -440,6 +459,31 @@ async fn get_generation_task(
     Ok(Json(ApiResponse::ok(task)))
 }
 
+async fn delete_generation_task(
+    State(state): State<ApiState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    state.generation_manager.delete_task(&task_id).await?;
+    Ok(Json(ApiResponse::with_message(
+        serde_json::json!({ "task_id": task_id }),
+        "generation task deleted",
+    )))
+}
+
+async fn delete_generation_tasks(
+    State(state): State<ApiState>,
+    Json(request): Json<DeleteTasksRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let deleted_ids = state.generation_manager.delete_tasks(&request.ids).await?;
+    Ok(Json(ApiResponse::with_message(
+        serde_json::json!({
+            "task_ids": deleted_ids,
+            "deleted_count": deleted_ids.len()
+        }),
+        "generation tasks deleted",
+    )))
+}
+
 async fn retry_generation_task(
     State(state): State<ApiState>,
     Path(task_id): Path<String>,
@@ -508,6 +552,31 @@ async fn get_publish_task(
         )));
     };
     Ok(Json(ApiResponse::ok(task)))
+}
+
+async fn delete_publish_task(
+    State(state): State<ApiState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    state.publish_manager.delete_task(&task_id).await?;
+    Ok(Json(ApiResponse::with_message(
+        serde_json::json!({ "task_id": task_id }),
+        "publish task deleted",
+    )))
+}
+
+async fn delete_publish_tasks(
+    State(state): State<ApiState>,
+    Json(request): Json<DeleteTasksRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+    let deleted_ids = state.publish_manager.delete_tasks(&request.ids).await?;
+    Ok(Json(ApiResponse::with_message(
+        serde_json::json!({
+            "task_ids": deleted_ids,
+            "deleted_count": deleted_ids.len()
+        }),
+        "publish tasks deleted",
+    )))
 }
 
 async fn retry_publish_task(

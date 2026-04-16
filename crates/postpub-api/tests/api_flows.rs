@@ -710,6 +710,119 @@ async fn generation_task_retry_reuses_existing_task_id() {
 }
 
 #[tokio::test]
+async fn generation_task_can_be_deleted_after_completion() {
+    let (app, _context, _temp) = test_app();
+
+    let request = GenerateArticleRequest {
+        topic: "delete generation task".to_string(),
+        reference_urls: vec![],
+        template_category: Some("general".to_string()),
+        template_name: Some("magazine".to_string()),
+        save_output: false,
+    };
+
+    let (status, created): (StatusCode, ApiResponse<GenerationTaskSummary>) = json_response(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/generation/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&request).expect("serialize request"),
+            ))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let failed = wait_for_task_completion(&app, &created.data.id).await;
+    assert_eq!(failed.status, GenerationTaskStatus::Failed);
+
+    let (status, deleted): (StatusCode, ApiResponse<serde_json::Value>) = json_response(
+        &app,
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/generation/tasks/{}", failed.id))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted.data["task_id"].as_str(), Some(failed.id.as_str()));
+
+    let (status, tasks): (StatusCode, ApiResponse<Vec<GenerationTaskSummary>>) = json_response(
+        &app,
+        Request::builder()
+            .uri("/api/generation/tasks")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(tasks.data.is_empty());
+}
+
+#[tokio::test]
+async fn generation_tasks_can_be_deleted_in_batch() {
+    let (app, _context, _temp) = test_app();
+
+    let request = GenerateArticleRequest {
+        topic: "batch delete generation tasks".to_string(),
+        reference_urls: vec![],
+        template_category: Some("general".to_string()),
+        template_name: Some("magazine".to_string()),
+        save_output: false,
+    };
+
+    let mut task_ids = Vec::new();
+    for _ in 0..2 {
+        let (status, created): (StatusCode, ApiResponse<GenerationTaskSummary>) = json_response(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/generation/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&request).expect("serialize request"),
+                ))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let failed = wait_for_task_completion(&app, &created.data.id).await;
+        assert_eq!(failed.status, GenerationTaskStatus::Failed);
+        task_ids.push(failed.id);
+    }
+
+    let (status, deleted): (StatusCode, ApiResponse<serde_json::Value>) = json_response(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/generation/tasks/actions/delete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "ids": task_ids }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted.data["deleted_count"].as_u64(), Some(2));
+
+    let (status, tasks): (StatusCode, ApiResponse<Vec<GenerationTaskSummary>>) = json_response(
+        &app,
+        Request::builder()
+            .uri("/api/generation/tasks")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(tasks.data.is_empty());
+}
+
+#[tokio::test]
 async fn publish_task_fails_with_clear_wechat_validation_error() {
     let (app, context, _temp) = test_app();
     configure_invalid_wechat_publish_target(&context);
@@ -844,4 +957,158 @@ async fn publish_task_retry_reuses_existing_task_id() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(tasks.data.len(), 1);
     assert_eq!(tasks.data[0].id, failed.id);
+}
+
+#[tokio::test]
+async fn publish_task_can_be_deleted_after_completion() {
+    let (app, context, _temp) = test_app();
+    configure_invalid_wechat_publish_target(&context);
+
+    let article = context
+        .article_store()
+        .save_generated_source_article(
+            "Wechat Publish Delete",
+            "# Wechat Publish Delete\n\nBody",
+            &[ArticleVariantDocument {
+                summary: ArticleVariantSummary {
+                    target_id: "publish-wechat-1".to_string(),
+                    target_name: "微信公众号 1".to_string(),
+                    platform_type: "wechat".to_string(),
+                    format: "HTML".to_string(),
+                    size_bytes: 0,
+                    updated_at: chrono::Utc::now(),
+                },
+                content: "<section><h1>Wechat Publish Delete</h1><p>Body</p></section>".to_string(),
+                preview_html: "<section><h1>Wechat Publish Delete</h1><p>Body</p></section>"
+                    .to_string(),
+            }],
+        )
+        .expect("save article");
+
+    let request = PublishArticleRequest {
+        article_relative_path: article.summary.relative_path.clone(),
+        target_id: "publish-wechat-1".to_string(),
+        mode: "draft".to_string(),
+    };
+
+    let (status, created): (StatusCode, ApiResponse<PublishTaskSummary>) = json_response(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/publish/tasks")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&request).expect("serialize publish request"),
+            ))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let failed = wait_for_publish_task_completion(&app, &created.data.id).await;
+    assert_eq!(failed.status, PublishTaskStatus::Failed);
+
+    let (status, deleted): (StatusCode, ApiResponse<serde_json::Value>) = json_response(
+        &app,
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/publish/tasks/{}", failed.id))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted.data["task_id"].as_str(), Some(failed.id.as_str()));
+
+    let (status, tasks): (StatusCode, ApiResponse<Vec<PublishTaskSummary>>) = json_response(
+        &app,
+        Request::builder()
+            .uri("/api/publish/tasks")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(tasks.data.is_empty());
+}
+
+#[tokio::test]
+async fn publish_tasks_can_be_deleted_in_batch() {
+    let (app, context, _temp) = test_app();
+    configure_invalid_wechat_publish_target(&context);
+
+    let article = context
+        .article_store()
+        .save_generated_source_article(
+            "Wechat Publish Batch Delete",
+            "# Wechat Publish Batch Delete\n\nBody",
+            &[ArticleVariantDocument {
+                summary: ArticleVariantSummary {
+                    target_id: "publish-wechat-1".to_string(),
+                    target_name: "微信公众号 1".to_string(),
+                    platform_type: "wechat".to_string(),
+                    format: "HTML".to_string(),
+                    size_bytes: 0,
+                    updated_at: chrono::Utc::now(),
+                },
+                content: "<section><h1>Wechat Publish Batch Delete</h1><p>Body</p></section>"
+                    .to_string(),
+                preview_html: "<section><h1>Wechat Publish Batch Delete</h1><p>Body</p></section>"
+                    .to_string(),
+            }],
+        )
+        .expect("save article");
+
+    let request = PublishArticleRequest {
+        article_relative_path: article.summary.relative_path.clone(),
+        target_id: "publish-wechat-1".to_string(),
+        mode: "draft".to_string(),
+    };
+
+    let mut task_ids = Vec::new();
+    for _ in 0..2 {
+        let (status, created): (StatusCode, ApiResponse<PublishTaskSummary>) = json_response(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/publish/tasks")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&request).expect("serialize publish request"),
+                ))
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let failed = wait_for_publish_task_completion(&app, &created.data.id).await;
+        assert_eq!(failed.status, PublishTaskStatus::Failed);
+        task_ids.push(failed.id);
+    }
+
+    let (status, deleted): (StatusCode, ApiResponse<serde_json::Value>) = json_response(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/api/publish/tasks/actions/delete")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "ids": task_ids }).to_string(),
+            ))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted.data["deleted_count"].as_u64(), Some(2));
+
+    let (status, tasks): (StatusCode, ApiResponse<Vec<PublishTaskSummary>>) = json_response(
+        &app,
+        Request::builder()
+            .uri("/api/publish/tasks")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(tasks.data.is_empty());
 }

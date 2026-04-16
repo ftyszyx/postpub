@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -223,6 +223,58 @@ impl GenerationManager {
 
     pub async fn get_task(&self, id: &str) -> Option<GenerationTaskSummary> {
         self.tasks.read().await.get(id).cloned()
+    }
+
+    pub async fn delete_task(&self, id: &str) -> postpub_core::Result<()> {
+        let deleted = self.delete_tasks(&[id.to_string()]).await?;
+        if deleted.is_empty() {
+            return Err(PostpubError::NotFound(format!(
+                "generation task not found: {id}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    pub async fn delete_tasks(&self, ids: &[String]) -> postpub_core::Result<Vec<String>> {
+        let normalized_ids = normalize_task_ids(ids);
+        if normalized_ids.is_empty() {
+            return Err(PostpubError::Validation(
+                "at least one generation task id is required".to_string(),
+            ));
+        }
+
+        let deleted_ids = {
+            let mut tasks = self.tasks.write().await;
+            for id in &normalized_ids {
+                if let Some(task) = tasks.get(id) {
+                    if is_generation_task_active(&task.status) {
+                        return Err(PostpubError::Conflict(format!(
+                            "generation task is still running and cannot be deleted: {id}"
+                        )));
+                    }
+                }
+            }
+
+            normalized_ids
+                .into_iter()
+                .filter(|id| tasks.remove(id).is_some())
+                .collect::<Vec<_>>()
+        };
+
+        if deleted_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        {
+            let mut streams = self.streams.write().await;
+            for id in &deleted_ids {
+                streams.remove(id);
+            }
+        }
+
+        self.persist_tasks().await;
+        Ok(deleted_ids)
     }
 
     pub async fn subscribe(&self, id: &str) -> Option<broadcast::Receiver<GenerationEvent>> {
@@ -526,6 +578,58 @@ impl PublishManager {
         self.tasks.read().await.get(id).cloned()
     }
 
+    pub async fn delete_task(&self, id: &str) -> postpub_core::Result<()> {
+        let deleted = self.delete_tasks(&[id.to_string()]).await?;
+        if deleted.is_empty() {
+            return Err(PostpubError::NotFound(format!(
+                "publish task not found: {id}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    pub async fn delete_tasks(&self, ids: &[String]) -> postpub_core::Result<Vec<String>> {
+        let normalized_ids = normalize_task_ids(ids);
+        if normalized_ids.is_empty() {
+            return Err(PostpubError::Validation(
+                "at least one publish task id is required".to_string(),
+            ));
+        }
+
+        let deleted_ids = {
+            let mut tasks = self.tasks.write().await;
+            for id in &normalized_ids {
+                if let Some(task) = tasks.get(id) {
+                    if is_publish_task_active(&task.status) {
+                        return Err(PostpubError::Conflict(format!(
+                            "publish task is still running and cannot be deleted: {id}"
+                        )));
+                    }
+                }
+            }
+
+            normalized_ids
+                .into_iter()
+                .filter(|id| tasks.remove(id).is_some())
+                .collect::<Vec<_>>()
+        };
+
+        if deleted_ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        {
+            let mut streams = self.streams.write().await;
+            for id in &deleted_ids {
+                streams.remove(id);
+            }
+        }
+
+        self.persist_tasks().await;
+        Ok(deleted_ids)
+    }
+
     pub async fn subscribe(&self, id: &str) -> Option<broadcast::Receiver<PublishEvent>> {
         self.streams
             .read()
@@ -742,4 +846,32 @@ fn normalize_restored_publish_task(mut task: PublishTaskSummary) -> PublishTaskS
     }
 
     task
+}
+
+fn normalize_task_ids(ids: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    ids.iter()
+        .filter_map(|id| {
+            let trimmed = id.trim();
+            if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+                return None;
+            }
+
+            Some(trimmed.to_string())
+        })
+        .collect()
+}
+
+fn is_generation_task_active(status: &GenerationTaskStatus) -> bool {
+    matches!(
+        status,
+        GenerationTaskStatus::Pending | GenerationTaskStatus::Running
+    )
+}
+
+fn is_publish_task_active(status: &PublishTaskStatus) -> bool {
+    matches!(
+        status,
+        PublishTaskStatus::Pending | PublishTaskStatus::Running
+    )
 }

@@ -161,4 +161,49 @@ describe("generation store", () => {
     );
     expect(FakeEventSource.instances[0]?.url).toContain("/api/generation/tasks/task-1/events");
   });
+
+  it("deletes completed tasks from local state", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        success: true,
+        data: {
+          task_id: "task-1"
+        }
+      })
+    );
+
+    const store = useGenerationStore();
+    const task = {
+      id: "task-1",
+      request: {
+        topic: "Rust workflow",
+        reference_urls: [],
+        template_category: "general",
+        template_name: "magazine",
+        save_output: true
+      },
+      status: "Failed" as const,
+      created_at: "2026-03-28T00:00:00Z",
+      updated_at: "2026-03-28T00:00:30Z",
+      events: [],
+      output: undefined,
+      error: "boom"
+    };
+    store.tasks = [task];
+    store.current = task;
+    store.eventSource = new FakeEventSource("/api/generation/tasks/task-1/events") as never;
+
+    const deleted = await store.deleteTask("task-1");
+
+    expect(deleted).toBe(true);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/generation/tasks/task-1",
+      expect.objectContaining({
+        method: "DELETE"
+      })
+    );
+    expect(store.tasks).toHaveLength(0);
+    expect(store.current).toBeNull();
+    expect(store.eventSource).toBeNull();
+  });
 });

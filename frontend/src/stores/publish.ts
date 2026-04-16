@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { apiGet, apiPost, type ApiResponse } from "../api/client";
+import { apiDelete, apiGet, apiPost, type ApiResponse } from "../api/client";
 import type {
   PublishEvent,
   PublishTaskStatus,
@@ -11,6 +11,10 @@ function normalizeTask(task: PublishTaskSummary): PublishTaskSummary {
     ...task,
     events: task.events ?? []
   };
+}
+
+function normalizeTaskIds(taskIds: string[]): string[] {
+  return [...new Set(taskIds.map((taskId) => taskId.trim()).filter(Boolean))];
 }
 
 export const usePublishStore = defineStore("publish", {
@@ -66,6 +70,45 @@ export const usePublishStore = defineStore("publish", {
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error);
         return null;
+      }
+    },
+
+    async deleteTask(taskId: string) {
+      this.error = "";
+
+      try {
+        await apiDelete<ApiResponse<{ task_id: string }>>(
+          `/api/publish/tasks/${encodeURIComponent(taskId)}`
+        );
+        this.removeTasks([taskId]);
+        return true;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+        return false;
+      }
+    },
+
+    async deleteTasks(taskIds: string[]) {
+      const normalizedIds = normalizeTaskIds(taskIds);
+      if (!normalizedIds.length) {
+        return [];
+      }
+
+      this.error = "";
+
+      try {
+        const response = await apiPost<ApiResponse<{ task_ids: string[]; deleted_count: number }>>(
+          "/api/publish/tasks/actions/delete",
+          {
+            ids: normalizedIds
+          }
+        );
+        const deletedIds = normalizeTaskIds(response.data.task_ids ?? normalizedIds);
+        this.removeTasks(deletedIds);
+        return deletedIds;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+        return [];
       }
     },
 
@@ -130,6 +173,33 @@ export const usePublishStore = defineStore("publish", {
         source.close();
       };
       this.eventSource = source;
+    },
+
+    removeTasks(taskIds: string[]) {
+      const deletedIds = new Set(normalizeTaskIds(taskIds));
+      if (!deletedIds.size) {
+        return;
+      }
+
+      const currentId = this.current?.id ?? null;
+      if (currentId && deletedIds.has(currentId)) {
+        this.eventSource?.close();
+        this.eventSource = null;
+      }
+
+      this.tasks = this.tasks.filter((task) => !deletedIds.has(task.id));
+
+      if (!currentId) {
+        this.current = this.tasks[0] ?? null;
+        return;
+      }
+
+      if (deletedIds.has(currentId)) {
+        this.current = this.tasks[0] ?? null;
+        return;
+      }
+
+      this.current = this.tasks.find((task) => task.id === currentId) ?? this.current;
     },
 
     dispose() {

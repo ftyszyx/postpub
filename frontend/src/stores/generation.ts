@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { apiGet, apiPost, type ApiResponse } from "../api/client";
+import { apiDelete, apiGet, apiPost, type ApiResponse } from "../api/client";
 import type {
   ArticleSummary,
   GenerateArticleRequest,
@@ -54,6 +54,10 @@ function normalizeTask(task: GenerationTaskSummary): GenerationTaskSummary {
     ...task,
     output: normalizeOutput(task.output)
   };
+}
+
+function normalizeTaskIds(taskIds: string[]): string[] {
+  return [...new Set(taskIds.map((taskId) => taskId.trim()).filter(Boolean))];
 }
 
 export const useGenerationStore = defineStore("generation", {
@@ -136,6 +140,44 @@ export const useGenerationStore = defineStore("generation", {
       }
     },
 
+    async deleteTask(taskId: string) {
+      this.error = "";
+
+      try {
+        await apiDelete<ApiResponse<{ task_id: string }>>(
+          `/api/generation/tasks/${encodeURIComponent(taskId)}`
+        );
+        this.removeTasks([taskId]);
+        return true;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+        return false;
+      }
+    },
+
+    async deleteTasks(taskIds: string[]) {
+      const normalizedIds = normalizeTaskIds(taskIds);
+      if (!normalizedIds.length) {
+        return [];
+      }
+
+      this.error = "";
+
+      try {
+        const response = await apiPost<
+          ApiResponse<{ task_ids: string[]; deleted_count: number }>
+        >("/api/generation/tasks/actions/delete", {
+          ids: normalizedIds
+        });
+        const deletedIds = normalizeTaskIds(response.data.task_ids ?? normalizedIds);
+        this.removeTasks(deletedIds);
+        return deletedIds;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+        return [];
+      }
+    },
+
     async selectTask(taskId: string) {
       try {
         const response = await apiGet<ApiResponse<GenerationTaskSummary>>(
@@ -208,6 +250,33 @@ export const useGenerationStore = defineStore("generation", {
         source.close();
       };
       this.eventSource = source;
+    },
+
+    removeTasks(taskIds: string[]) {
+      const deletedIds = new Set(normalizeTaskIds(taskIds));
+      if (!deletedIds.size) {
+        return;
+      }
+
+      const currentId = this.current?.id ?? null;
+      if (currentId && deletedIds.has(currentId)) {
+        this.eventSource?.close();
+        this.eventSource = null;
+      }
+
+      this.tasks = this.tasks.filter((task) => !deletedIds.has(task.id));
+
+      if (!currentId) {
+        this.current = this.tasks[0] ?? null;
+        return;
+      }
+
+      if (deletedIds.has(currentId)) {
+        this.current = this.tasks[0] ?? null;
+        return;
+      }
+
+      this.current = this.tasks.find((task) => task.id === currentId) ?? this.current;
     },
 
     dispose() {

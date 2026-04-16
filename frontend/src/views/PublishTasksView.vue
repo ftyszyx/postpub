@@ -12,6 +12,7 @@ import {
   message,
 } from "ant-design-vue";
 import {
+  DeleteOutlined,
   EyeOutlined,
   ReloadOutlined,
   SearchOutlined,
@@ -37,7 +38,13 @@ const { t, te } = useI18n();
 const searchKeyword = ref("");
 const detailOpen = ref(false);
 const selectedTaskId = ref("");
+const selectedTaskIds = ref<string[]>([]);
+const deletingTaskIds = ref<string[]>([]);
+const batchDeleting = ref(false);
 const retryingTaskId = ref("");
+const tablePageSize = ref(20);
+const wechatLoginPromptTaskId = ref("");
+let wechatLoginPromptModal: { destroy: () => void } | null = null;
 
 const detailTask = computed(
   () =>
@@ -57,9 +64,39 @@ const displayEvents = computed<DisplayEvent[]>(() => {
   }));
 });
 const currentEvent = computed(() => displayEvents.value[0] ?? null);
+const selectedTasks = computed(() =>
+  publishStore.tasks.filter((task) => selectedTaskIds.value.includes(task.id)),
+);
+const deletableSelectedTasks = computed(() =>
+  selectedTasks.value.filter(canDeleteTask),
+);
+const rowSelection = computed(() => ({
+  selectedRowKeys: selectedTaskIds.value,
+  onChange: (keys: Array<string | number>) => {
+    selectedTaskIds.value = keys.map((key) => String(key));
+  },
+  getCheckboxProps: (record: PublishTaskSummary) => ({
+    disabled: !canDeleteTask(record),
+  }),
+}));
+const tablePagination = computed(() => ({
+  pageSize: tablePageSize.value,
+  showSizeChanger: true,
+  pageSizeOptions: ["20", "50", "100"],
+  onShowSizeChange: (_current: number, size: number) => {
+    tablePageSize.value = size;
+  },
+  onChange: (_page: number, size: number) => {
+    tablePageSize.value = size;
+  },
+}));
 
 function asTask(record: unknown) {
   return record as PublishTaskSummary;
+}
+
+function canDeleteTask(task: PublishTaskSummary) {
+  return task.status === "Succeeded" || task.status === "Failed";
 }
 
 function taskTitle(task: PublishTaskSummary) {
@@ -115,11 +152,15 @@ function stageLabel(stage: string) {
 function formatScopedStageLabel(stage: string) {
   const segmentKeys: Record<string, string> = {
     wechat: "config.sections.publishPlatformTypeWechat",
+    auth: "publish.wechatLoginPromptTitle",
     browser: "config.sections.browserEnvironmentEyebrow",
     settings: "config.sections.wechatSettingsSummary",
     prepare: "publish.stages.prepare",
     target: "publish.stages.target",
     save: "common.save",
+    required: "publish.wechatLoginRequiredStage",
+    waiting: "publish.wechatLoginWaitingStage",
+    token_detected: "publish.wechatLoginDetectedStage",
     done: "publish.stages.done",
     mode: "common.mode",
     close: "common.close",
@@ -221,7 +262,7 @@ const tableColumns = computed(() => [
   {
     title: t("common.actions"),
     key: "actions",
-    width: 180,
+    width: 260,
     fixed: "right" as const,
   },
 ]);
@@ -250,11 +291,176 @@ async function retryTask(task: PublishTaskSummary) {
   message.success(t("publish.retryTaskSuccess"));
 }
 
+function isDeletingTask(taskId: string) {
+  return deletingTaskIds.value.includes(taskId);
+}
+
+function markDeletingTasks(taskIds: string[]) {
+  deletingTaskIds.value = [...new Set([...deletingTaskIds.value, ...taskIds])];
+}
+
+function unmarkDeletingTasks(taskIds: string[]) {
+  const deleted = new Set(taskIds);
+  deletingTaskIds.value = deletingTaskIds.value.filter((taskId) => !deleted.has(taskId));
+}
+
+function syncTaskSelectionAfterDelete(taskIds: string[]) {
+  const deleted = new Set(taskIds);
+  selectedTaskIds.value = selectedTaskIds.value.filter((taskId) => !deleted.has(taskId));
+  if (selectedTaskId.value && deleted.has(selectedTaskId.value)) {
+    closeTaskDetail();
+  }
+}
+
+async function performDeleteTasks(tasks: PublishTaskSummary[]) {
+  const taskIds = tasks.map((task) => task.id);
+  if (!taskIds.length) {
+    return [];
+  }
+
+  markDeletingTasks(taskIds);
+  if (taskIds.length > 1) {
+    batchDeleting.value = true;
+  }
+
+  try {
+    const deletedIds =
+      taskIds.length === 1
+        ? ((await publishStore.deleteTask(taskIds[0])) ? taskIds : [])
+        : await publishStore.deleteTasks(taskIds);
+    syncTaskSelectionAfterDelete(deletedIds);
+    return deletedIds;
+  } finally {
+    unmarkDeletingTasks(taskIds);
+    batchDeleting.value = false;
+  }
+}
+
+function confirmDeleteTask(task: PublishTaskSummary) {
+  AModal.confirm({
+    title: t("publish.deleteTaskTitle"),
+    content: t("publish.deleteTaskPrompt", {
+      title: taskTitle(task),
+    }),
+    okText: t("common.delete"),
+    cancelText: t("common.cancel"),
+    okButtonProps: { danger: true },
+    onOk: async () => {
+      const deletedIds = await performDeleteTasks([task]);
+      if (deletedIds.length) {
+        message.success(t("publish.deleteTaskSuccess"));
+      }
+    },
+  });
+}
+
+function confirmDeleteSelectedTasks() {
+  const tasks = deletableSelectedTasks.value;
+  if (!tasks.length) {
+    return;
+  }
+
+  AModal.confirm({
+    title: t("publish.batchDeleteTitle"),
+    content: t("publish.batchDeletePrompt", {
+      count: tasks.length,
+    }),
+    okText: t("common.delete"),
+    cancelText: t("common.cancel"),
+    okButtonProps: { danger: true },
+    onOk: async () => {
+      const deletedIds = await performDeleteTasks(tasks);
+      if (deletedIds.length) {
+        message.success(
+          t("publish.batchDeleteTaskSuccess", {
+            count: deletedIds.length,
+          }),
+        );
+      }
+    },
+  });
+}
+
 function taskRowProps(task: PublishTaskSummary) {
   return {
-    onClick: () => openTaskDetail(task),
+    onClick: (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.closest(".ant-table-selection-column") ||
+        target?.closest("button") ||
+        target?.closest("a")
+      ) {
+        return;
+      }
+
+      openTaskDetail(task);
+    },
     style: "cursor: pointer;",
   };
+}
+
+function taskNeedsWechatLoginPrompt(task: PublishTaskSummary | null | undefined) {
+  if (!task || (task.status !== "Pending" && task.status !== "Running")) {
+    return false;
+  }
+
+  let loginRequired = false;
+  for (const event of task.events) {
+    if (event.stage === "wechat.auth.required") {
+      loginRequired = true;
+      continue;
+    }
+
+    if (
+      event.stage === "wechat.auth.token_detected" ||
+      event.stage === "wechat.editor.ready" ||
+      event.status === "Succeeded" ||
+      event.status === "Failed"
+    ) {
+      loginRequired = false;
+    }
+  }
+
+  return loginRequired;
+}
+
+function closeWechatLoginPrompt() {
+  wechatLoginPromptModal?.destroy();
+  wechatLoginPromptModal = null;
+  wechatLoginPromptTaskId.value = "";
+}
+
+function openWechatLoginPrompt(task: PublishTaskSummary) {
+  if (wechatLoginPromptTaskId.value === task.id && wechatLoginPromptModal) {
+    return;
+  }
+
+  closeWechatLoginPrompt();
+  wechatLoginPromptTaskId.value = task.id;
+  wechatLoginPromptModal = AModal.info({
+    title: t("publish.wechatLoginPromptTitle"),
+    content: t("publish.wechatLoginPromptBody", {
+      target: targetLabel(task),
+    }),
+    okText: t("publish.wechatLoginPromptOk"),
+    closable: true,
+    maskClosable: true,
+    onOk: () => {
+      wechatLoginPromptModal = null;
+    },
+    onCancel: () => {
+      wechatLoginPromptModal = null;
+    },
+  });
+}
+
+function syncWechatLoginPrompt(task: PublishTaskSummary | null | undefined) {
+  if (taskNeedsWechatLoginPrompt(task)) {
+    openWechatLoginPrompt(task!);
+    return;
+  }
+
+  closeWechatLoginPrompt();
 }
 
 async function openTaskFromRoute() {
@@ -281,7 +487,35 @@ watch(
   },
 );
 
+watch(
+  () => publishStore.tasks.map((task) => task.id),
+  (taskIds) => {
+    const activeIds = new Set(taskIds);
+    selectedTaskIds.value = selectedTaskIds.value.filter((taskId) =>
+      activeIds.has(taskId),
+    );
+    if (selectedTaskId.value && !activeIds.has(selectedTaskId.value)) {
+      closeTaskDetail();
+    }
+  },
+);
+
+watch(
+  () => ({
+    id: (detailTask.value ?? publishStore.current)?.id ?? "",
+    status: (detailTask.value ?? publishStore.current)?.status ?? "",
+    events: ((detailTask.value ?? publishStore.current)?.events ?? [])
+      .map((event) => `${event.stage}:${event.status}`)
+      .join("|"),
+  }),
+  () => {
+    syncWechatLoginPrompt(detailTask.value ?? publishStore.current);
+  },
+  { immediate: true },
+);
+
 onBeforeUnmount(() => {
+  closeWechatLoginPrompt();
   publishStore.dispose();
 });
 </script>
@@ -294,24 +528,50 @@ onBeforeUnmount(() => {
 
     <ACard :title="t('publish.taskListTitle')" class="task-status-card">
       <template #extra>
-        <AInput
-          v-model:value="searchKeyword"
-          :placeholder="t('publish.taskSearchPlaceholder')"
-          allow-clear
-          class="task-search-input"
-        >
-          <template #prefix>
-            <SearchOutlined />
-          </template>
-        </AInput>
+        <div class="task-toolbar">
+          <AInput
+            v-model:value="searchKeyword"
+            :placeholder="t('publish.taskSearchPlaceholder')"
+            allow-clear
+            class="task-search-input"
+          >
+            <template #prefix>
+              <SearchOutlined />
+            </template>
+          </AInput>
+          <ASpace>
+            <span
+              v-if="selectedTaskIds.length"
+              class="task-selection-hint"
+            >
+              {{
+                t("publish.selectedCount", {
+                  count: selectedTaskIds.length,
+                })
+              }}
+            </span>
+            <AButton
+              danger
+              :disabled="!deletableSelectedTasks.length"
+              :loading="batchDeleting"
+              @click="confirmDeleteSelectedTasks"
+            >
+              <template #icon>
+                <DeleteOutlined />
+              </template>
+              {{ t("publish.batchDelete") }}
+            </AButton>
+          </ASpace>
+        </div>
       </template>
 
       <ATable
         :columns="tableColumns"
         :data-source="filteredTasks"
-        :pagination="{ pageSize: 8, showSizeChanger: false }"
-        :scroll="{ x: 1080 }"
+        :pagination="tablePagination"
+        :scroll="{ x: 1240 }"
         row-key="id"
+        :row-selection="rowSelection"
         :custom-row="taskRowProps"
       >
         <template #emptyText>
@@ -375,6 +635,18 @@ onBeforeUnmount(() => {
                   <ReloadOutlined />
                 </template>
                 {{ t("publish.retryTask") }}
+              </AButton>
+              <AButton
+                v-if="canDeleteTask(asTask(record))"
+                danger
+                size="small"
+                :loading="isDeletingTask(asTask(record).id)"
+                @click.stop="confirmDeleteTask(asTask(record))"
+              >
+                <template #icon>
+                  <DeleteOutlined />
+                </template>
+                {{ t("common.delete") }}
               </AButton>
             </ASpace>
           </template>
@@ -513,6 +785,17 @@ onBeforeUnmount(() => {
         <ASpace>
           <AButton @click="closeTaskDetail">{{ t("common.close") }}</AButton>
           <AButton
+            v-if="detailTask && canDeleteTask(detailTask)"
+            danger
+            :loading="isDeletingTask(detailTask.id)"
+            @click="confirmDeleteTask(detailTask)"
+          >
+            <template #icon>
+              <DeleteOutlined />
+            </template>
+            {{ t("common.delete") }}
+          </AButton>
+          <AButton
             v-if="detailTask?.status === 'Failed'"
             danger
             :loading="retryingTaskId === detailTask.id"
@@ -541,6 +824,19 @@ onBeforeUnmount(() => {
 
 .task-search-input {
   width: min(420px, 100%);
+}
+
+.task-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.task-selection-hint {
+  color: var(--ink-faint);
+  white-space: nowrap;
 }
 
 .task-table-topic {
@@ -632,6 +928,11 @@ onBeforeUnmount(() => {
 @media (max-width: 720px) {
   .task-search-input {
     width: 100%;
+  }
+
+  .task-toolbar {
+    width: 100%;
+    justify-content: stretch;
   }
 
   .task-event-list__header {

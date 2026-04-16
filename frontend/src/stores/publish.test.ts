@@ -131,4 +131,47 @@ describe("publish store", () => {
     );
     expect(FakeEventSource.instances[0]?.url).toContain("/api/publish/tasks/publish-task-1/events");
   });
+
+  it("deletes completed publish tasks from local state", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      jsonResponse({
+        success: true,
+        data: {
+          task_id: "publish-task-1"
+        }
+      })
+    );
+
+    const store = usePublishStore();
+    const task = {
+      id: "publish-task-1",
+      request: {
+        article_relative_path: "vibecoding.md",
+        target_id: "publish-wechat-1",
+        mode: "draft"
+      },
+      status: "Failed" as const,
+      created_at: "2026-04-12T00:00:00Z",
+      updated_at: "2026-04-12T00:00:01Z",
+      events: [],
+      output: undefined,
+      error: "boom"
+    };
+    store.tasks = [task];
+    store.current = task;
+    store.eventSource = new FakeEventSource("/api/publish/tasks/publish-task-1/events") as never;
+
+    const deleted = await store.deleteTask("publish-task-1");
+
+    expect(deleted).toBe(true);
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/publish/tasks/publish-task-1",
+      expect.objectContaining({
+        method: "DELETE"
+      })
+    );
+    expect(store.tasks).toHaveLength(0);
+    expect(store.current).toBeNull();
+    expect(store.eventSource).toBeNull();
+  });
 });

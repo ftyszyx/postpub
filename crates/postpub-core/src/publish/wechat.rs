@@ -19,6 +19,10 @@ use crate::browser::{browser_profile_dir, sanitize_profile_component};
 use crate::{preview_html, AppContext, PostpubError, Result};
 
 use super::{runtime::AgentBrowserRuntime, BrowserRuntime, PublishProgressReporter, Publisher};
+
+const WECHAT_LOGIN_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+const WECHAT_LOGIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
 #[derive(Clone)]
 pub struct WechatPublisher {
     context: AppContext,
@@ -86,21 +90,7 @@ impl WechatPublisher {
         reporter.report("wechat.browser.open", "opening wechat dashboard");
         open_wechat_dashboard(runtime, &target.publish_url, reporter).await?;
 
-        reporter.report("wechat.auth", "checking wechat login state");
-        let current_url = runtime.get_url().await?;
-        reporter.report("wechat.auth.url", format!("current page {current_url}"));
-        let Some(token) = extract_query_value(&current_url, "token") else {
-            let body_text = runtime.get_text("body").await?;
-            if body_text.contains("使用账号登录") || body_text.contains("登录") {
-                return Err(PostpubError::External(format!(
-                    "wechat login is required. Please log in once with the browser profile for target '{}'",
-                    target.id
-                )));
-            }
-            return Err(PostpubError::External(format!(
-                "failed to determine wechat token from current url: {current_url}"
-            )));
-        };
+        let token = ensure_wechat_login_token(runtime, target, reporter).await?;
 
         open_wechat_editor(runtime, &origin, &token, reporter).await?;
 
@@ -675,6 +665,28 @@ fn extract_query_value(url: &str, key: &str) -> Option<String> {
         .map(|(_, value)| value.to_string())
 }
 
+fn normalize_wechat_page_text(input: &str) -> String {
+    input.split_whitespace().collect::<String>()
+}
+
+fn looks_like_wechat_login_page(url: &str, body_text: &str) -> bool {
+    if !looks_like_wechat_url(url) {
+        return false;
+    }
+
+    let normalized = normalize_wechat_page_text(body_text);
+    [
+        "微信扫码登录",
+        "扫码登录",
+        "微信扫一扫",
+        "公众号平台账号登录",
+        "使用账号登录",
+        "使用帐号登录",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
 fn resolve_wechat_cover_request(
     context: &AppContext,
     target: &PublishTargetConfig,
@@ -685,19 +697,12 @@ fn resolve_wechat_cover_request(
     let body_has_image = html_contains_image(body_html);
 
     let plan = match target.wechat.cover_strategy.trim() {
-        "custom_path" => {
-            WechatCoverPlan::Upload(resolve_wechat_cover_path(context, target, article)?)
-        }
+        "custom_path" => resolve_wechat_custom_cover_plan(context, target, article, body_has_image),
         "article_cover" => {
-            WechatCoverPlan::Upload(resolve_wechat_cover_path(context, target, article)?)
+            resolve_wechat_article_cover_plan(context, target, article, body_has_image)
         }
         "first_image" if body_has_image => WechatCoverPlan::BodyFirstImage,
-        "first_image" => {
-            return Err(PostpubError::Validation(
-                "wechat cover strategy 'first_image' requires at least one image in the article body"
-                    .to_string(),
-            ));
-        }
+        "first_image" => WechatCoverPlan::PlatformAi,
         "platform_ai" => WechatCoverPlan::PlatformAi,
         "manual" => {
             return Err(PostpubError::Validation(
@@ -713,6 +718,36 @@ fn resolve_wechat_cover_request(
     };
 
     Ok(WechatCoverRequest { plan, size })
+}
+
+fn resolve_wechat_custom_cover_plan(
+    context: &AppContext,
+    target: &PublishTargetConfig,
+    article: &ArticleDocument,
+    body_has_image: bool,
+) -> WechatCoverPlan {
+    if let Some(path) = resolve_optional_wechat_cover_path(context, target, article) {
+        WechatCoverPlan::Upload(path)
+    } else if body_has_image {
+        WechatCoverPlan::BodyFirstImage
+    } else {
+        WechatCoverPlan::PlatformAi
+    }
+}
+
+fn resolve_wechat_article_cover_plan(
+    context: &AppContext,
+    target: &PublishTargetConfig,
+    article: &ArticleDocument,
+    body_has_image: bool,
+) -> WechatCoverPlan {
+    if let Some(path) = resolve_optional_wechat_cover_path(context, target, article) {
+        WechatCoverPlan::Upload(path)
+    } else if body_has_image {
+        WechatCoverPlan::BodyFirstImage
+    } else {
+        WechatCoverPlan::PlatformAi
+    }
 }
 
 fn resolve_wechat_cover_size(target: &PublishTargetConfig) -> Result<WechatCoverSize> {
@@ -749,6 +784,20 @@ fn resolve_wechat_cover_path(
 
     resolve_local_cover_path(context, article, &raw_path)
         .ok_or_else(|| PostpubError::NotFound(format!("wechat cover file not found: {raw_path}")))
+}
+
+fn resolve_optional_wechat_cover_path(
+    context: &AppContext,
+    target: &PublishTargetConfig,
+    article: &ArticleDocument,
+) -> Option<PathBuf> {
+    let raw_path = resolve_wechat_cover_source(context, target, article)?;
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    resolve_local_cover_path(context, article, trimmed)
 }
 
 fn resolve_wechat_cover_source(
@@ -873,6 +922,81 @@ async fn open_wechat_dashboard<R: BrowserRuntime>(
     );
 
     Ok(())
+}
+
+async fn ensure_wechat_login_token<R: BrowserRuntime>(
+    runtime: &R,
+    target: &PublishTargetConfig,
+    reporter: &PublishProgressReporter,
+) -> Result<String> {
+    reporter.report("wechat.auth", "checking wechat login state");
+    let current_url = runtime.get_url().await?;
+    reporter.report("wechat.auth.url", format!("current page {current_url}"));
+
+    if let Some(token) = extract_query_value(&current_url, "token") {
+        return Ok(token);
+    }
+
+    let body_text = runtime.get_text("body").await?;
+    if looks_like_wechat_login_page(&current_url, &body_text) {
+        reporter.report(
+            "wechat.auth.required",
+            "未检测到微信公众号登录状态，请在内置浏览器中使用微信扫码登录。",
+        );
+        reporter.report(
+            "wechat.auth.waiting",
+            "正在等待扫码登录成功，系统会每 1 秒自动检查一次登录状态。",
+        );
+        return wait_for_wechat_login_token(
+            runtime,
+            WECHAT_LOGIN_WAIT_TIMEOUT,
+            WECHAT_LOGIN_POLL_INTERVAL,
+            reporter,
+        )
+        .await;
+    }
+
+    Err(PostpubError::External(format!(
+        "failed to determine wechat token from current url for target '{}': {current_url}",
+        target.id
+    )))
+}
+
+async fn wait_for_wechat_login_token<R: BrowserRuntime>(
+    runtime: &R,
+    timeout: Duration,
+    poll_interval: Duration,
+    reporter: &PublishProgressReporter,
+) -> Result<String> {
+    let deadline = Instant::now() + timeout;
+    let mut last_url = String::new();
+
+    loop {
+        let current_url = runtime.get_url().await?;
+        if !current_url.trim().is_empty() {
+            last_url = current_url.clone();
+        }
+
+        if let Some(token) = extract_query_value(&current_url, "token") {
+            reporter.report(
+                "wechat.auth.token_detected",
+                "检测到微信公众号登录成功，继续执行发布流程。",
+            );
+            return Ok(token);
+        }
+
+        if Instant::now() >= deadline {
+            let mut detail =
+                "等待微信公众号扫码登录超时，请在内置浏览器中完成扫码并在手机上确认登录后重试。"
+                    .to_string();
+            if !last_url.is_empty() {
+                detail.push_str(&format!(" 最后页面地址：{last_url}"));
+            }
+            return Err(PostpubError::External(detail));
+        }
+
+        runtime.wait_ms(poll_interval.as_millis() as u64).await?;
+    }
 }
 
 async fn apply_wechat_publish_settings<R: BrowserRuntime>(
@@ -1966,7 +2090,7 @@ mod tests {
     }
 
     #[test]
-    fn article_cover_strategy_requires_local_cover() {
+    fn article_cover_strategy_falls_back_to_platform_ai_without_local_cover() {
         let temp = tempdir().expect("temp dir");
         let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
         context.bootstrap().expect("bootstrap");
@@ -1974,32 +2098,69 @@ mod tests {
         let article = sample_article("demo.md");
         let target = PublishTargetConfig::default();
 
-        let result = resolve_wechat_cover_request(
+        let cover = resolve_wechat_cover_request(
             &context,
             &target,
             &article,
             "<section><p>Body</p></section>",
-        );
+        )
+        .expect("cover request");
 
-        assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("cover"));
+        assert!(matches!(cover.plan, WechatCoverPlan::PlatformAi));
     }
 
     #[test]
-    fn resolving_cover_request_fails_fast_when_custom_cover_is_missing() {
+    fn custom_path_strategy_falls_back_to_platform_ai_when_file_is_missing() {
         let temp = tempdir().expect("temp dir");
         let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
         context.bootstrap().expect("bootstrap");
 
-        let result = resolve_wechat_cover_request(
+        let cover = resolve_wechat_cover_request(
             &context,
             &sample_target(),
             &sample_article("demo.md"),
             "<section><p>Body</p></section>",
-        );
+        )
+        .expect("cover request");
 
-        assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("cover"));
+        assert!(matches!(cover.plan, WechatCoverPlan::PlatformAi));
+    }
+
+    #[test]
+    fn article_cover_strategy_falls_back_to_first_body_image_when_available() {
+        let temp = tempdir().expect("temp dir");
+        let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
+        context.bootstrap().expect("bootstrap");
+
+        let cover = resolve_wechat_cover_request(
+            &context,
+            &PublishTargetConfig::default(),
+            &sample_article("demo.md"),
+            r#"<section><img src="https://example.com/body-cover.png" /></section>"#,
+        )
+        .expect("cover request");
+
+        assert!(matches!(cover.plan, WechatCoverPlan::BodyFirstImage));
+    }
+
+    #[test]
+    fn first_image_strategy_falls_back_to_platform_ai_when_body_has_no_image() {
+        let temp = tempdir().expect("temp dir");
+        let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
+        context.bootstrap().expect("bootstrap");
+
+        let mut target = PublishTargetConfig::default();
+        target.wechat.cover_strategy = "first_image".to_string();
+
+        let cover = resolve_wechat_cover_request(
+            &context,
+            &target,
+            &sample_article("demo.md"),
+            "<section><p>Body</p></section>",
+        )
+        .expect("cover request");
+
+        assert!(matches!(cover.plan, WechatCoverPlan::PlatformAi));
     }
 
     #[test]
@@ -2063,6 +2224,99 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("wechat dashboard"));
         assert!(message.contains("token=321"));
+    }
+
+    #[test]
+    fn detects_wechat_login_page_from_qr_login_copy() {
+        let body = "登录 使用帐号登录 微信扫一扫，选择该微信下的公众号平台账号登录";
+
+        assert!(looks_like_wechat_login_page(
+            "https://mp.weixin.qq.com/",
+            body
+        ));
+    }
+
+    #[tokio::test]
+    async fn ensure_wechat_login_token_uses_existing_token_when_available() {
+        let runtime = MockRuntime::default();
+        runtime.urls.lock().unwrap().push_back(
+            "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=456".to_string(),
+        );
+        let reporter = PublishProgressReporter::new(|_, _| {});
+
+        let token = ensure_wechat_login_token(&runtime, &sample_target(), &reporter)
+            .await
+            .expect("should reuse existing token");
+
+        assert_eq!(token, "456");
+    }
+
+    #[tokio::test]
+    async fn ensure_wechat_login_token_waits_for_qr_login() {
+        let runtime = MockRuntime::default();
+        runtime.urls.lock().unwrap().extend([
+            "https://mp.weixin.qq.com/".to_string(),
+            "https://mp.weixin.qq.com/".to_string(),
+            "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=789".to_string(),
+        ]);
+        runtime
+            .texts
+            .lock()
+            .unwrap()
+            .push_back("登录 使用帐号登录 微信扫一扫".to_string());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured_events = events.clone();
+        let reporter = PublishProgressReporter::new(move |stage, message| {
+            captured_events.lock().unwrap().push((stage, message));
+        });
+
+        let token = ensure_wechat_login_token(&runtime, &sample_target(), &reporter)
+            .await
+            .expect("should wait until token appears");
+
+        assert_eq!(token, "789");
+        let recorded = events.lock().unwrap().clone();
+        assert!(
+            recorded
+                .iter()
+                .any(|(stage, _)| stage == "wechat.auth.required"),
+            "expected login prompt event, got: {recorded:?}"
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|(stage, _)| stage == "wechat.auth.waiting"),
+            "expected login waiting event, got: {recorded:?}"
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|(stage, _)| stage == "wechat.auth.token_detected"),
+            "expected token detected event, got: {recorded:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_wechat_login_token_times_out_without_token() {
+        let runtime = MockRuntime::default();
+        runtime.urls.lock().unwrap().extend([
+            "https://mp.weixin.qq.com/".to_string(),
+            "https://mp.weixin.qq.com/".to_string(),
+        ]);
+        let reporter = PublishProgressReporter::new(|_, _| {});
+
+        let error = wait_for_wechat_login_token(
+            &runtime,
+            Duration::from_millis(0),
+            Duration::from_secs(1),
+            &reporter,
+        )
+        .await
+        .expect_err("should time out without token");
+
+        let message = error.to_string();
+        assert!(message.contains("扫码登录超时"));
+        assert!(message.contains("https://mp.weixin.qq.com/"));
     }
 
     #[test]
