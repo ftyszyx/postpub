@@ -40,6 +40,17 @@ export interface BrowserEnvironmentStatus {
   profile_entry_count: number;
 }
 
+export interface PublishTargetLoginStatus {
+  target_id: string;
+  target_name: string;
+  platform_type: string;
+  valid: boolean;
+  needs_login: boolean;
+  checked_at: string;
+  current_url?: string | null;
+  detail?: string | null;
+}
+
 export interface PlatformSource {
   name: string;
   weight: number;

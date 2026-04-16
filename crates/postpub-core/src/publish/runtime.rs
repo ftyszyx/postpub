@@ -97,6 +97,10 @@ pub trait BrowserRuntime: Send + Sync {
         ))
     }
 
+    async fn wait_load_with_timeout_ms(&self, state: &str, _timeout_ms: u64) -> Result<()> {
+        self.wait_load(state).await
+    }
+
     async fn wait_ms(&self, _ms: u64) -> Result<()> {
         Err(PostpubError::External(
             "browser runtime is not configured yet".to_string(),
@@ -396,6 +400,19 @@ impl BrowserRuntime for AgentBrowserRuntime {
 
     async fn wait_load(&self, state: &str) -> Result<()> {
         self.run(&["wait", "--load", state]).await.map(|_| ())
+    }
+
+    async fn wait_load_with_timeout_ms(&self, state: &str, timeout_ms: u64) -> Result<()> {
+        let timeout = timeout_ms.to_string();
+        let command_timeout_ms = (timeout_ms.saturating_add(3_000)).max(8_000);
+        self.run_with_options(
+            &["wait", "--load", state],
+            None,
+            &[("AGENT_BROWSER_DEFAULT_TIMEOUT", timeout.as_str())],
+            Some(Duration::from_millis(command_timeout_ms)),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn wait_ms(&self, ms: u64) -> Result<()> {

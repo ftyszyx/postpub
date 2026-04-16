@@ -11,7 +11,8 @@ use postpub_types::{
     ApiResponse, AppPathsInfo, ArticleDesign, BrowserEnvironmentStatus, ConfigBundle,
     CreateTemplateCategoryRequest, CreateTemplateRequest, GenerateArticleRequest, HealthStatus,
     MoveTemplateRequest, PublishArticleRequest, RenameTemplateCategoryRequest,
-    RenameTemplateRequest, TemplateCategorySummary, TemplateDocument, TemplateSummary, UiConfig,
+    PublishTargetLoginStatus, RenameTemplateRequest, TemplateCategorySummary, TemplateDocument,
+    TemplateSummary, UiConfig,
     UpdateArticleContentRequest, UpdateTemplateContentRequest,
 };
 use tokio_stream::wrappers::BroadcastStream;
@@ -103,6 +104,10 @@ pub fn api_router() -> Router<ApiState> {
         .route(
             "/api/publish/tasks/actions/delete",
             post(delete_publish_tasks),
+        )
+        .route(
+            "/api/publish/targets/{target_id}/login-status",
+            post(check_publish_target_login_status),
         )
         .route(
             "/api/publish/tasks/{task_id}",
@@ -532,6 +537,22 @@ async fn create_publish_task(
     Ok(Json(ApiResponse::with_message(
         summary,
         "publish task created",
+    )))
+}
+
+async fn check_publish_target_login_status(
+    State(state): State<ApiState>,
+    Path(target_id): Path<String>,
+) -> Result<Json<ApiResponse<PublishTargetLoginStatus>>, ApiError> {
+    let status = state
+        .context
+        .publish_service()
+        .check_target_login_status(&target_id)
+        .await?;
+
+    Ok(Json(ApiResponse::with_message(
+        status,
+        "publish target login status checked",
     )))
 }
 

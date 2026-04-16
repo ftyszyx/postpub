@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { marked } from "marked";
 import { useI18n } from "vue-i18n";
@@ -827,9 +827,9 @@ watch(articleEditorSelectedSourceKey, () => {
   });
 });
 
-if (!articleStore.articles.length && !articleStore.loading) {
+onMounted(() => {
   void articleStore.loadAll();
-}
+});
 
 onBeforeUnmount(() => {
   stopArticleEditorResize();

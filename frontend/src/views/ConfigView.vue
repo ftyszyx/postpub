@@ -32,6 +32,7 @@ import type {
   CustomLlmProvider,
   ImageModelProvider,
   PublishTargetConfig,
+  PublishTargetLoginStatus,
   TemplateSummary,
 } from "../types/postpub";
 
@@ -68,6 +69,8 @@ const publishTargetBrowserStatus = ref<BrowserEnvironmentStatus | null>(null);
 const publishTargetBrowserLoading = ref(false);
 const publishTargetBrowserError = ref("");
 const publishTargetBrowserMessage = ref("");
+const publishTargetLoginStatus = ref<PublishTargetLoginStatus | null>(null);
+const publishTargetLoginCheckingId = ref("");
 const publishTargetOpeningId = ref("");
 
 const publishTargetTemplateOptions = computed(() =>
@@ -191,7 +194,7 @@ const llmModelColumns = computed(() => [
   {
     title: t("common.actions"),
     key: "actions",
-    width: 260,
+    width: 360,
     fixed: "right" as const,
   },
 ]);
@@ -415,6 +418,19 @@ function publishTargetWechatSummary(target: PublishTargetConfig) {
   return parts.join(" / ");
 }
 
+function formatPublishTargetLoginCheckedAt(value?: string | null) {
+  if (!value) {
+    return "-";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleString();
+}
+
 function syncActiveImageProvider(providerId?: string) {
   const nextActiveProvider =
     imageModels.value.find((provider) => provider.id === providerId) ||
@@ -579,6 +595,7 @@ function openCreatePublishTargetModal() {
   publishTargetBrowserStatus.value = null;
   publishTargetBrowserError.value = "";
   publishTargetBrowserMessage.value = "";
+  publishTargetLoginStatus.value = null;
   ensurePublishTargetTemplateSelection();
   publishTargetModalOpen.value = true;
 }
@@ -591,6 +608,7 @@ function openEditPublishTargetModal(target: PublishTargetConfig) {
   };
   publishTargetBrowserError.value = "";
   publishTargetBrowserMessage.value = "";
+  publishTargetLoginStatus.value = null;
   ensurePublishTargetTemplateSelection();
   publishTargetModalOpen.value = true;
   void loadPublishTargetBrowserStatus(target.id);
@@ -603,6 +621,7 @@ function closePublishTargetModal() {
   publishTargetBrowserLoading.value = false;
   publishTargetBrowserError.value = "";
   publishTargetBrowserMessage.value = "";
+  publishTargetLoginStatus.value = null;
 }
 
 async function savePublishTargetDraft() {
@@ -668,6 +687,75 @@ async function openPublishTargetHomepage(target: PublishTargetConfig) {
   } finally {
     publishTargetOpeningId.value = "";
   }
+}
+
+async function checkPublishTargetLogin(target: PublishTargetConfig) {
+  publishTargetLoginCheckingId.value = target.id;
+
+  try {
+    const response = await apiPost<ApiResponse<PublishTargetLoginStatus>>(
+      `/api/publish/targets/${encodePathSegments(target.id)}/login-status`,
+    );
+    const status = response.data;
+    const targetName = status.target_name || target.name || target.id;
+
+    if (publishTargetEditId.value === target.id) {
+      publishTargetLoginStatus.value = status;
+    }
+
+    if (status.valid) {
+      message.success(
+        t("config.sections.loginCheckSuccess", {
+          name: targetName,
+        }),
+      );
+      return;
+    }
+
+    message.warning(
+      t("config.sections.loginCheckInvalid", {
+        name: targetName,
+      }),
+    );
+
+    if (status.needs_login) {
+      AModal.confirm({
+        title: t("config.sections.loginCheckOpenLoginTitle"),
+        content: t("config.sections.loginCheckOpenLoginBody", {
+          target: targetName,
+          detail:
+            status.detail?.trim() ||
+            t("config.sections.loginCheckUnknownDetail"),
+        }),
+        okText: t("config.sections.loginCheckOpenLoginOk"),
+        cancelText: t("config.sections.loginCheckOpenLoginCancel"),
+        onOk: async () => {
+          await openPublishTargetHomepage(target);
+        },
+      });
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    message.error(
+      t("config.sections.loginCheckFailed", {
+        error: detail,
+      }),
+    );
+  } finally {
+    publishTargetLoginCheckingId.value = "";
+  }
+}
+
+async function checkCurrentPublishTargetLogin() {
+  if (!publishTargetEditId.value) {
+    return;
+  }
+
+  await checkPublishTargetLogin({
+    ...publishTargetDraft.value,
+    id: publishTargetEditId.value,
+    wechat: { ...publishTargetDraft.value.wechat },
+  });
 }
 
 async function loadPublishTargetBrowserStatus(targetId?: string | null) {
@@ -1010,7 +1098,7 @@ watch(
         :columns="publishPlatformColumns"
         :data-source="publishTargets"
         :pagination="false"
-        :scroll="{ x: 1360 }"
+        :scroll="{ x: 1500 }"
         row-key="id"
       >
         <template #emptyText>
@@ -1044,6 +1132,19 @@ watch(
 
           <template v-else-if="column.key === 'actions'">
             <ASpace wrap size="small">
+              <AButton
+                size="small"
+                :loading="
+                  publishTargetLoginCheckingId === asPublishTarget(record).id
+                "
+                @click="checkPublishTargetLogin(asPublishTarget(record))"
+              >
+                {{
+                  publishTargetLoginCheckingId === asPublishTarget(record).id
+                    ? t("config.sections.testLoginChecking")
+                    : t("config.sections.testLoginItem")
+                }}
+              </AButton>
               <AButton
                 size="small"
                 :loading="publishTargetOpeningId === asPublishTarget(record).id"
@@ -1405,6 +1506,57 @@ watch(
             {{ publishTargetBrowserError }}
           </div>
 
+          <div v-if="publishTargetLoginStatus" class="browser-status-card">
+            <div class="browser-status-grid">
+              <div class="browser-status-item">
+                <span class="browser-status-item__label">{{
+                  t("config.sections.loginStatusTitle")
+                }}</span>
+                <strong>
+                  {{
+                    publishTargetLoginStatus.valid
+                      ? t("config.sections.loginStatusValid")
+                      : t("config.sections.loginStatusInvalid")
+                  }}
+                  <template v-if="publishTargetLoginStatus.needs_login">
+                    · {{ t("config.sections.loginStatusNeedsLogin") }}
+                  </template>
+                </strong>
+              </div>
+              <div class="browser-status-item">
+                <span class="browser-status-item__label">{{
+                  t("config.sections.loginStatusLastChecked")
+                }}</span>
+                <strong>{{
+                  formatPublishTargetLoginCheckedAt(
+                    publishTargetLoginStatus.checked_at,
+                  )
+                }}</strong>
+              </div>
+            </div>
+
+            <div class="browser-status-paths">
+              <div
+                v-if="publishTargetLoginStatus.current_url"
+                class="browser-status-path"
+              >
+                <span class="browser-status-item__label">{{
+                  t("config.sections.loginStatusCurrentUrl")
+                }}</span>
+                <code>{{ publishTargetLoginStatus.current_url }}</code>
+              </div>
+              <div
+                v-if="publishTargetLoginStatus.detail"
+                class="browser-status-path"
+              >
+                <span class="browser-status-item__label">{{
+                  t("config.sections.loginStatusDetail")
+                }}</span>
+                <code>{{ publishTargetLoginStatus.detail }}</code>
+              </div>
+            </div>
+          </div>
+
           <div class="browser-status-card">
             <div class="browser-status-grid">
               <div class="browser-status-item">
@@ -1478,6 +1630,16 @@ watch(
             </div>
 
             <div class="config-actions-bar">
+              <AButton
+                :loading="publishTargetLoginCheckingId === publishTargetEditId"
+                @click="checkCurrentPublishTargetLogin"
+              >
+                {{
+                  publishTargetLoginCheckingId === publishTargetEditId
+                    ? t("config.sections.testLoginChecking")
+                    : t("config.sections.testLoginItem")
+                }}
+              </AButton>
               <AButton
                 :loading="publishTargetBrowserLoading"
                 @click="loadPublishTargetBrowserStatus(publishTargetEditId)"

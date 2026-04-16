@@ -44,9 +44,7 @@ onMounted(() => {
   if (!templateStore.categories.length && !templateStore.loading) {
     void templateStore.loadAll();
   }
-  if (!articleStore.articles.length && !articleStore.loading) {
-    void articleStore.loadAll();
-  }
+  void articleStore.loadAll();
   if (!generationStore.tasks.length && !generationStore.loading) {
     void generationStore.loadTasks();
   }

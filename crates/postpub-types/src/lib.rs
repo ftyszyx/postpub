@@ -95,6 +95,21 @@ pub struct BrowserEnvironmentStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishTargetLoginStatus {
+    pub target_id: String,
+    pub target_name: String,
+    pub platform_type: String,
+    pub valid: bool,
+    #[serde(default)]
+    pub needs_login: bool,
+    pub checked_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlatformSource {
     pub name: String,
     pub weight: f32,

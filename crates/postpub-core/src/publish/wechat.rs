@@ -5,9 +5,10 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::Utc;
 use postpub_types::{
     ArticleDesign, ArticleDocument, ArticleVariantDocument, PublishArticleRequest, PublishOutput,
-    PublishTargetConfig,
+    PublishTargetConfig, PublishTargetLoginStatus,
 };
 use regex::Regex;
 use tokio::{
@@ -22,6 +23,8 @@ use super::{runtime::AgentBrowserRuntime, BrowserRuntime, PublishProgressReporte
 
 const WECHAT_LOGIN_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const WECHAT_LOGIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const WECHAT_DASHBOARD_OPEN_TIMEOUT_MS: u64 = 15_000;
+const WECHAT_DASHBOARD_DOM_READY_TIMEOUT_MS: u64 = 3_000;
 
 #[derive(Clone)]
 pub struct WechatPublisher {
@@ -68,6 +71,88 @@ impl WechatCoverPlan {
 impl WechatPublisher {
     pub fn new(context: AppContext) -> Self {
         Self { context }
+    }
+
+    pub async fn check_login_status(
+        &self,
+        target: &PublishTargetConfig,
+    ) -> Result<PublishTargetLoginStatus> {
+        let browser_executable = self
+            .context
+            .browser_manager()
+            .ensure_browser_executable()
+            .await?;
+        let browser_profile = resolve_browser_profile_dir(&self.context, target)?;
+        fs::create_dir_all(&browser_profile)?;
+
+        let runtime = AgentBrowserRuntime::new(
+            resolve_wechat_session_name(target),
+            Some(browser_executable),
+            Some(browser_profile),
+        );
+        let check_result = self.check_login_status_with_runtime(&runtime, target).await;
+        let close_result = runtime.close().await;
+
+        match (check_result, close_result) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(status), Ok(())) => Ok(status),
+        }
+    }
+
+    async fn check_login_status_with_runtime<R: BrowserRuntime>(
+        &self,
+        runtime: &R,
+        target: &PublishTargetConfig,
+    ) -> Result<PublishTargetLoginStatus> {
+        let reporter = PublishProgressReporter::new(|_, _| {});
+        open_wechat_dashboard(runtime, &target.publish_url, &reporter).await?;
+
+        let current_url = runtime.get_url().await?;
+        let checked_at = Utc::now();
+        let token = extract_query_value(&current_url, "token");
+        let body_text = if token.is_none() {
+            runtime.get_text("body").await?
+        } else {
+            String::new()
+        };
+
+        let (valid, needs_login, detail) = if token.is_some() {
+            (true, false, Some("微信公众号登录状态有效".to_string()))
+        } else if looks_like_wechat_login_page(&current_url, &body_text) {
+            (
+                false,
+                true,
+                Some("未检测到微信公众号登录状态，请在内置浏览器中重新扫码登录。".to_string()),
+            )
+        } else {
+            (
+                false,
+                false,
+                Some(format!(
+                    "当前页面未包含微信公众号登录 token，无法确认登录状态是否有效。页面地址：{current_url}"
+                )),
+            )
+        };
+
+        Ok(PublishTargetLoginStatus {
+            target_id: target.id.clone(),
+            target_name: if target.name.trim().is_empty() {
+                target.id.clone()
+            } else {
+                target.name.clone()
+            },
+            platform_type: target.platform_type.clone(),
+            valid,
+            needs_login,
+            checked_at,
+            current_url: if current_url.trim().is_empty() {
+                None
+            } else {
+                Some(current_url)
+            },
+            detail,
+        })
     }
 
     async fn publish_with_runtime<R: BrowserRuntime>(
@@ -904,7 +989,44 @@ async fn open_wechat_dashboard<R: BrowserRuntime>(
     url: &str,
     reporter: &PublishProgressReporter,
 ) -> Result<()> {
-    open_url(runtime, url, 5_000).await?;
+    match navigate_to_url(runtime, url).await {
+        Ok(()) => {
+            if let Err(error) = runtime
+                .wait_load_with_timeout_ms(
+                    "domcontentloaded",
+                    WECHAT_DASHBOARD_DOM_READY_TIMEOUT_MS,
+                )
+                .await
+            {
+                reporter.report(
+                    "wechat.browser.dom_ready_timeout",
+                    format!(
+                        "wechat dashboard domcontentloaded wait timed out, continuing to inspect page state: {error}"
+                    ),
+                );
+            }
+        }
+        Err(error) => {
+            reporter.report(
+                "wechat.browser.navigate_fallback",
+                format!(
+                    "direct location navigation failed, fallback to open command: {error}"
+                ),
+            );
+            if let Err(error) = open_url(runtime, url, WECHAT_DASHBOARD_OPEN_TIMEOUT_MS).await {
+                if should_continue_after_browser_open_timeout(&error) {
+                    reporter.report(
+                        "wechat.browser.open_timeout",
+                        format!(
+                            "wechat dashboard open timed out, continuing to inspect page state: {error}"
+                        ),
+                    );
+                } else {
+                    return Err(error);
+                }
+            }
+        }
+    }
     reporter.report("wechat.browser.opened", "wechat dashboard opened");
     reporter.report(
         "wechat.browser.wait",
@@ -922,6 +1044,15 @@ async fn open_wechat_dashboard<R: BrowserRuntime>(
     );
 
     Ok(())
+}
+
+fn should_continue_after_browser_open_timeout(error: &PostpubError) -> bool {
+    matches!(
+        error,
+        PostpubError::External(message)
+            if message.contains("agent-browser command timed out after")
+                && message.contains("open ")
+    )
 }
 
 async fn ensure_wechat_login_token<R: BrowserRuntime>(
@@ -1944,6 +2075,7 @@ mod tests {
     struct MockRuntime {
         calls: Arc<Mutex<Vec<String>>>,
         eval_results: Arc<Mutex<VecDeque<String>>>,
+        open_errors: Arc<Mutex<VecDeque<String>>>,
         texts: Arc<Mutex<VecDeque<String>>>,
         urls: Arc<Mutex<VecDeque<String>>>,
     }
@@ -1971,6 +2103,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("open_timeout:{url}:{timeout_ms}"));
+            if let Some(error) = self.open_errors.lock().unwrap().pop_front() {
+                return Err(PostpubError::External(error));
+            }
             Ok(())
         }
 
@@ -2179,7 +2314,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_wechat_dashboard_uses_short_open_timeout() {
+    async fn open_wechat_dashboard_uses_dashboard_open_timeout() {
         let runtime = MockRuntime::with_eval_results(&["true"]);
         runtime.urls.lock().unwrap().push_back(
             "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=123".to_string(),
@@ -2198,8 +2333,8 @@ mod tests {
         assert!(
             calls
                 .iter()
-                .any(|entry| entry == "open_timeout:https://mp.weixin.qq.com:5000"),
-            "expected short open timeout for dashboard bootstrap, got: {calls:?}"
+                .any(|entry| entry == "open_timeout:https://mp.weixin.qq.com:15000"),
+            "expected dashboard open timeout to be propagated, got: {calls:?}"
         );
         let recorded = events.lock().unwrap().clone();
         assert!(
@@ -2208,6 +2343,22 @@ mod tests {
                 .any(|(stage, _)| stage == "wechat.browser.ready"),
             "expected ready event, got: {recorded:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn open_wechat_dashboard_continues_after_open_timeout() {
+        let runtime = MockRuntime::with_eval_results(&["true"]);
+        runtime.open_errors.lock().unwrap().push_back(
+            "agent-browser command timed out after 18s: open https://mp.weixin.qq.com".to_string(),
+        );
+        runtime.urls.lock().unwrap().push_back(
+            "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=123".to_string(),
+        );
+        let reporter = PublishProgressReporter::new(|_, _| {});
+
+        open_wechat_dashboard(&runtime, "https://mp.weixin.qq.com", &reporter)
+            .await
+            .expect("wechat dashboard should still be inspected after open timeout");
     }
 
     #[tokio::test]
@@ -2317,6 +2468,88 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("扫码登录超时"));
         assert!(message.contains("https://mp.weixin.qq.com/"));
+    }
+
+    #[tokio::test]
+    async fn check_login_status_reports_valid_when_token_exists() {
+        let temp = tempdir().expect("temp dir");
+        let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
+        let publisher = WechatPublisher::new(context);
+        let runtime = MockRuntime::with_eval_results(&["true"]);
+        runtime.urls.lock().unwrap().extend([
+            "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=456".to_string(),
+            "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=456".to_string(),
+        ]);
+
+        let status = publisher
+            .check_login_status_with_runtime(&runtime, &sample_target())
+            .await
+            .expect("login status should be valid");
+
+        assert!(status.valid);
+        assert!(!status.needs_login);
+        assert_eq!(
+            status.current_url.as_deref(),
+            Some("https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=456")
+        );
+    }
+
+    #[tokio::test]
+    async fn check_login_status_reports_login_required_for_qr_page() {
+        let temp = tempdir().expect("temp dir");
+        let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
+        let publisher = WechatPublisher::new(context);
+        let runtime = MockRuntime::with_eval_results(&["true"]);
+        runtime.urls.lock().unwrap().extend([
+            "https://mp.weixin.qq.com/".to_string(),
+            "https://mp.weixin.qq.com/".to_string(),
+        ]);
+        runtime.texts.lock().unwrap().push_back(
+            "登录 使用帐号登录 微信扫一扫，选择该微信下的公众号平台账号登录".to_string(),
+        );
+
+        let status = publisher
+            .check_login_status_with_runtime(&runtime, &sample_target())
+            .await
+            .expect("login status should be returned");
+
+        assert!(!status.valid);
+        assert!(status.needs_login);
+        assert!(status
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("重新扫码登录"));
+    }
+
+    #[tokio::test]
+    async fn check_login_status_reports_unknown_invalid_state_without_login_prompt() {
+        let temp = tempdir().expect("temp dir");
+        let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
+        let publisher = WechatPublisher::new(context);
+        let runtime = MockRuntime::with_eval_results(&["true"]);
+        runtime.urls.lock().unwrap().extend([
+            "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN".to_string(),
+            "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN".to_string(),
+        ]);
+        runtime
+            .texts
+            .lock()
+            .unwrap()
+            .push_back("内容管理 草稿箱 数据概况".to_string());
+
+        let status = publisher
+            .check_login_status_with_runtime(&runtime, &sample_target())
+            .await
+            .expect("login status should be returned");
+
+        assert!(!status.valid);
+        assert!(!status.needs_login);
+        assert!(status
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("无法确认登录状态"));
     }
 
     #[test]
