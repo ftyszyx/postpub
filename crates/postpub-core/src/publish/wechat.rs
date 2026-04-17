@@ -1908,14 +1908,6 @@ fn looks_like_wechat_url(url: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn wait_until_true<R: BrowserRuntime>(
-    runtime: &R,
-    script: &str,
-    timeout: Duration,
-) -> Result<()> {
-    wait_until_true_with_context(runtime, script, timeout, "wechat page state").await
-}
-
 async fn wait_until_true_with_context<R: BrowserRuntime>(
     runtime: &R,
     script: &str,
@@ -1957,7 +1949,7 @@ async fn wait_for_wechat_editor_fields<R: BrowserRuntime>(
 ) -> Result<()> {
     wait_until_true_with_context(
         runtime,
-        r#"(() => {
+        r##"(() => {
             const isVisible = (node) => {
                 if (!node) {
                     return false;
@@ -1972,7 +1964,7 @@ async fn wait_for_wechat_editor_fields<R: BrowserRuntime>(
             return isVisible(document.querySelector(".js_title"))
                 && isVisible(document.querySelector(".ProseMirror"))
                 && isVisible(document.querySelector("#js_cover_area"));
-        })()"#,
+        })()"##,
         timeout,
         "wechat editor fields",
     )
