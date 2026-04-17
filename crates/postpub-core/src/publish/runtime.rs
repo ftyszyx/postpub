@@ -43,6 +43,15 @@ pub trait BrowserRuntime: Send + Sync {
         self.open(url).await
     }
 
+    async fn open_with_wait_until_and_timeout_ms(
+        &self,
+        url: &str,
+        _wait_until: &str,
+        timeout_ms: u64,
+    ) -> Result<()> {
+        self.open_with_timeout_ms(url, timeout_ms).await
+    }
+
     async fn click(&self, _selector: &str) -> Result<()> {
         Err(PostpubError::External(
             "browser runtime is not configured yet".to_string(),
@@ -349,11 +358,36 @@ impl BrowserRuntime for AgentBrowserRuntime {
 
     async fn open_with_timeout_ms(&self, url: &str, timeout_ms: u64) -> Result<()> {
         let timeout = timeout_ms.to_string();
-        let command_timeout_ms = (timeout_ms.saturating_add(3_000)).max(8_000);
+        let command_timeout_ms = navigation_command_timeout_ms(timeout_ms);
         self.run_with_options(
-            &["open", url],
+            &["open", url, "--timeout", timeout.as_str()],
             None,
-            &[("AGENT_BROWSER_DEFAULT_TIMEOUT", timeout.as_str())],
+            &[],
+            Some(Duration::from_millis(command_timeout_ms)),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn open_with_wait_until_and_timeout_ms(
+        &self,
+        url: &str,
+        wait_until: &str,
+        timeout_ms: u64,
+    ) -> Result<()> {
+        let timeout = timeout_ms.to_string();
+        let command_timeout_ms = navigation_command_timeout_ms(timeout_ms);
+        self.run_with_options(
+            &[
+                "open",
+                url,
+                "--wait-until",
+                wait_until,
+                "--timeout",
+                timeout.as_str(),
+            ],
+            None,
+            &[],
             Some(Duration::from_millis(command_timeout_ms)),
         )
         .await
@@ -406,9 +440,9 @@ impl BrowserRuntime for AgentBrowserRuntime {
         let timeout = timeout_ms.to_string();
         let command_timeout_ms = (timeout_ms.saturating_add(3_000)).max(8_000);
         self.run_with_options(
-            &["wait", "--load", state],
+            &["wait", "--load", state, "--timeout", timeout.as_str()],
             None,
-            &[("AGENT_BROWSER_DEFAULT_TIMEOUT", timeout.as_str())],
+            &[],
             Some(Duration::from_millis(command_timeout_ms)),
         )
         .await
@@ -440,5 +474,24 @@ fn format_duration_for_log(duration: Duration) -> String {
         format!("{}s", duration.as_secs())
     } else {
         format!("{}ms", duration.as_millis())
+    }
+}
+
+fn navigation_command_timeout_ms(timeout_ms: u64) -> u64 {
+    timeout_ms.saturating_add(2_000)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::navigation_command_timeout_ms;
+
+    #[test]
+    fn navigation_command_timeout_gives_browser_startup_grace() {
+        assert_eq!(navigation_command_timeout_ms(3_000), 5_000);
+    }
+
+    #[test]
+    fn navigation_command_timeout_scales_for_longer_navigation_budget() {
+        assert_eq!(navigation_command_timeout_ms(10_000), 12_000);
     }
 }

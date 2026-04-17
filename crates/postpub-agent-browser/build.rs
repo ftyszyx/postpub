@@ -1,13 +1,12 @@
 use std::collections::HashSet;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const AGENT_BROWSER_ROOT: &str = "../../agent-browser";
 
 fn main() {
     ensure_dashboard_dir();
-    generate_main_body();
     generate_cdp_types();
 }
 
@@ -24,21 +23,6 @@ fn ensure_dashboard_dir() {
             "<!DOCTYPE html><html><body><p>Dashboard not built. Run: cd packages/dashboard &amp;&amp; pnpm build</p></body></html>\n",
         );
     }
-}
-
-fn generate_main_body() {
-    let main_path = Path::new(AGENT_BROWSER_ROOT).join("cli/src/main.rs");
-    println!("cargo:rerun-if-changed={}", main_path.display());
-
-    let content = fs::read_to_string(&main_path).expect("failed to read agent-browser main.rs");
-    let normalized = content.replace("\r\n", "\n");
-    let body = normalized
-        .split_once("\n\n")
-        .map(|(_, body)| body)
-        .unwrap_or(normalized.as_str());
-
-    let out_path = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("main_body.rs");
-    fs::write(out_path, body).expect("failed to write generated main_body.rs");
 }
 
 fn generate_cdp_types() {

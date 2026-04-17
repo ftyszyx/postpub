@@ -10,10 +10,10 @@ use futures::StreamExt;
 use postpub_types::{
     ApiResponse, AppPathsInfo, ArticleDesign, BrowserEnvironmentStatus, ConfigBundle,
     CreateTemplateCategoryRequest, CreateTemplateRequest, GenerateArticleRequest, HealthStatus,
-    MoveTemplateRequest, PublishArticleRequest, RenameTemplateCategoryRequest,
-    PublishTargetLoginStatus, RenameTemplateRequest, TemplateCategorySummary, TemplateDocument,
-    TemplateSummary, UiConfig,
-    UpdateArticleContentRequest, UpdateTemplateContentRequest,
+    MoveTemplateRequest, PublishArticleRequest, PublishTargetLoginStatus,
+    RenameTemplateCategoryRequest, RenameTemplateRequest, TemplateCategorySummary,
+    TemplateDocument, TemplateSummary, UiConfig, UpdateArticleContentRequest,
+    UpdateTemplateContentRequest,
 };
 use tokio_stream::wrappers::BroadcastStream;
 

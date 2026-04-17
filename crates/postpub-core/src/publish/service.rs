@@ -37,9 +37,7 @@ impl PublishService {
             .publish_targets
             .into_iter()
             .find(|item| item.id == target_id)
-            .ok_or_else(|| {
-                PostpubError::NotFound(format!("publish target not found: {target_id}"))
-            })
+            .ok_or_else(|| PostpubError::NotFound(format!("publish target not found: {target_id}")))
     }
 
     pub async fn check_target_login_status(

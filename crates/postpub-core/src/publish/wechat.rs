@@ -23,8 +23,7 @@ use super::{runtime::AgentBrowserRuntime, BrowserRuntime, PublishProgressReporte
 
 const WECHAT_LOGIN_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const WECHAT_LOGIN_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const WECHAT_DASHBOARD_OPEN_TIMEOUT_MS: u64 = 15_000;
-const WECHAT_DASHBOARD_DOM_READY_TIMEOUT_MS: u64 = 3_000;
+const WECHAT_NAVIGATION_DOM_READY_TIMEOUT_MS: u64 = 3_000;
 
 #[derive(Clone)]
 pub struct WechatPublisher {
@@ -178,6 +177,7 @@ impl WechatPublisher {
         let token = ensure_wechat_login_token(runtime, target, reporter).await?;
 
         open_wechat_editor(runtime, &origin, &token, reporter).await?;
+        wait_for_wechat_editor_fields(runtime, Duration::from_secs(8)).await?;
 
         reporter.report("wechat.title", "填写文章标题");
         runtime.fill(".js_title", &plan.title).await?;
@@ -191,15 +191,6 @@ impl WechatPublisher {
 
         reporter.report("wechat.body", "写入文章正文");
         set_editor_html(runtime, &plan.body_html).await?;
-        wait_until_true(
-            runtime,
-            r#"(() => {
-                const editor = document.querySelector(".ProseMirror");
-                return !!editor && (editor.innerText || "").trim().length > 0;
-            })()"#,
-            Duration::from_secs(10),
-        )
-        .await?;
 
         reporter.report("wechat.cover", "打开封面选择面板");
         click_first_visible_selector(
@@ -978,8 +969,7 @@ async fn open_wechat_editor<R: BrowserRuntime>(
         "{origin}/cgi-bin/appmsg?t=media/appmsg_edit_v2&action=edit&isNew=1&type=77&token={token}"
     );
     reporter.report("wechat.editor.direct", "opening direct editor url");
-    navigate_to_url(runtime, &editor_url).await?;
-    wait_for_editor_ready(runtime, Duration::from_secs(15)).await?;
+    open_wechat_url(runtime, &editor_url, reporter, "wechat.editor").await?;
     reporter.report("wechat.editor.ready", "direct editor page is ready");
     Ok(())
 }
@@ -989,64 +979,17 @@ async fn open_wechat_dashboard<R: BrowserRuntime>(
     url: &str,
     reporter: &PublishProgressReporter,
 ) -> Result<()> {
-    match navigate_to_url(runtime, url).await {
-        Ok(()) => {
-            if let Err(error) = runtime
-                .wait_load_with_timeout_ms(
-                    "domcontentloaded",
-                    WECHAT_DASHBOARD_DOM_READY_TIMEOUT_MS,
-                )
-                .await
-            {
-                reporter.report(
-                    "wechat.browser.dom_ready_timeout",
-                    format!(
-                        "wechat dashboard domcontentloaded wait timed out, continuing to inspect page state: {error}"
-                    ),
-                );
-            }
-        }
-        Err(error) => {
-            reporter.report(
-                "wechat.browser.navigate_fallback",
-                format!(
-                    "direct location navigation failed, fallback to open command: {error}"
-                ),
-            );
-            if let Err(error) = open_url(runtime, url, WECHAT_DASHBOARD_OPEN_TIMEOUT_MS).await {
-                if should_continue_after_browser_open_timeout(&error) {
-                    reporter.report(
-                        "wechat.browser.open_timeout",
-                        format!(
-                            "wechat dashboard open timed out, continuing to inspect page state: {error}"
-                        ),
-                    );
-                } else {
-                    return Err(error);
-                }
-            }
-        }
-    }
+    open_wechat_url(runtime, url, reporter, "wechat.browser").await?;
     reporter.report("wechat.browser.opened", "wechat dashboard opened");
     reporter.report(
-        "wechat.browser.wait",
-        "waiting for wechat dashboard to become interactive",
-    );
-
-    let current_url = wait_for_wechat_dashboard_state(runtime, Duration::from_secs(20)).await?;
-    reporter.report(
         "wechat.browser.ready",
-        if current_url.is_empty() {
-            "wechat dashboard is ready".to_string()
-        } else {
-            format!("wechat dashboard is ready at {current_url}")
-        },
+        "wechat dashboard navigation finished after domcontentloaded",
     );
 
     Ok(())
 }
 
-fn should_continue_after_browser_open_timeout(error: &PostpubError) -> bool {
+fn should_continue_after_open_timeout(error: &PostpubError) -> bool {
     matches!(
         error,
         PostpubError::External(message)
@@ -1350,22 +1293,37 @@ async fn click_any_text<R: BrowserRuntime>(
     )))
 }
 
-async fn open_url<R: BrowserRuntime>(runtime: &R, url: &str, timeout_ms: u64) -> Result<()> {
-    runtime.open_with_timeout_ms(url, timeout_ms).await
+async fn open_url_with_domcontentloaded<R: BrowserRuntime>(
+    runtime: &R,
+    url: &str,
+    timeout_ms: u64,
+) -> Result<()> {
+    runtime
+        .open_with_wait_until_and_timeout_ms(url, "domcontentloaded", timeout_ms)
+        .await
 }
 
-async fn navigate_to_url<R: BrowserRuntime>(runtime: &R, url: &str) -> Result<()> {
-    let url_json = serde_json::to_string(url)?;
-    let script = format!(
-        r#"
-(() => {{
-  window.location.assign({url_json});
-  return window.location.href;
-}})()
-"#
-    );
+async fn open_wechat_url<R: BrowserRuntime>(
+    runtime: &R,
+    url: &str,
+    reporter: &PublishProgressReporter,
+    stage_prefix: &str,
+) -> Result<()> {
+    if let Err(error) =
+        open_url_with_domcontentloaded(runtime, url, WECHAT_NAVIGATION_DOM_READY_TIMEOUT_MS).await
+    {
+        if should_continue_after_open_timeout(&error) {
+            reporter.report(
+                format!("{stage_prefix}.open_timeout"),
+                format!("wechat navigation timed out, continuing with current page state: {error}"),
+            );
+            return Ok(());
+        }
 
-    runtime.evaluate(&script).await.map(|_| ())
+        return Err(error);
+    }
+
+    Ok(())
 }
 
 async fn open_wechat_setting<R: BrowserRuntime>(runtime: &R, label: &str) -> Result<()> {
@@ -1605,7 +1563,13 @@ async fn wait_for_any_visible_selector<R: BrowserRuntime>(
 "#
     );
 
-    wait_until_true(runtime, &script, timeout).await
+    wait_until_true_with_context(
+        runtime,
+        &script,
+        timeout,
+        &format!("any visible selector: {}", selectors.join(", ")),
+    )
+    .await
 }
 
 async fn is_any_visible_selector<R: BrowserRuntime>(
@@ -1818,7 +1782,7 @@ async fn wait_for_wechat_cover_candidates<R: BrowserRuntime>(
 })()
 "#;
 
-    wait_until_true(runtime, script, timeout).await
+    wait_until_true_with_context(runtime, script, timeout, "wechat cover candidates").await
 }
 
 async fn click_first_wechat_cover_candidate<R: BrowserRuntime>(runtime: &R) -> Result<()> {
@@ -1893,70 +1857,16 @@ async fn wait_for_wechat_cover_preview<R: BrowserRuntime>(
     runtime: &R,
     timeout: Duration,
 ) -> Result<()> {
-    wait_until_true(
+    wait_until_true_with_context(
         runtime,
         r##"(() => {
             const preview = document.querySelector("#js_cover_area .js_cover_preview_new");
             return !!preview && getComputedStyle(preview).backgroundImage && getComputedStyle(preview).backgroundImage !== "none";
         })()"##,
         timeout,
+        "wechat cover preview",
     )
     .await
-}
-
-async fn wait_for_wechat_dashboard_state<R: BrowserRuntime>(
-    runtime: &R,
-    timeout: Duration,
-) -> Result<String> {
-    let dashboard_ready_script = r##"
-(() => {
-  const ready = document.readyState === "interactive" || document.readyState === "complete";
-  if (!ready) {
-    return false;
-  }
-
-  const text = document.body?.innerText || "";
-  const selectors = [
-    ".weui-desktop-layout",
-    ".weui-desktop-panel",
-    ".weui-desktop-menu",
-    "#app"
-  ];
-  const hasDesktopUi = selectors.some((selector) => document.querySelector(selector));
-  return hasDesktopUi
-    || text.includes("公众号")
-    || text.includes("内容管理")
-    || text.includes("登录")
-    || text.includes("首页");
-})()
-"##;
-
-    let deadline = Instant::now() + timeout;
-    let mut last_url = String::new();
-
-    loop {
-        let current_url = runtime.get_url().await?;
-        if !current_url.trim().is_empty() {
-            last_url = current_url.clone();
-        }
-
-        if looks_like_wechat_url(&current_url)
-            && evaluate_bool(runtime, dashboard_ready_script).await?
-        {
-            return Ok(current_url);
-        }
-
-        if Instant::now() >= deadline {
-            let mut detail =
-                "timed out waiting for wechat dashboard to become interactive".to_string();
-            if !last_url.is_empty() {
-                detail.push_str(&format!(" (last url: {last_url})"));
-            }
-            return Err(PostpubError::External(detail));
-        }
-
-        sleep(Duration::from_millis(500)).await;
-    }
 }
 
 async fn wait_for_text<R: BrowserRuntime>(
@@ -2003,16 +1913,34 @@ async fn wait_until_true<R: BrowserRuntime>(
     script: &str,
     timeout: Duration,
 ) -> Result<()> {
+    wait_until_true_with_context(runtime, script, timeout, "wechat page state").await
+}
+
+async fn wait_until_true_with_context<R: BrowserRuntime>(
+    runtime: &R,
+    script: &str,
+    timeout: Duration,
+    context: &str,
+) -> Result<()> {
     let deadline = Instant::now() + timeout;
+    let mut last_url = String::new();
     loop {
+        let current_url = runtime.get_url().await?;
+        if !current_url.trim().is_empty() {
+            last_url = current_url;
+        }
+
         if evaluate_bool(runtime, script).await? {
             return Ok(());
         }
 
         if Instant::now() >= deadline {
-            return Err(PostpubError::External(
-                "timed out waiting for wechat page state".to_string(),
-            ));
+            let detail = if last_url.is_empty() {
+                format!("timed out waiting for {context}")
+            } else {
+                format!("timed out waiting for {context} (last url: {last_url})")
+            };
+            return Err(PostpubError::External(detail));
         }
 
         sleep(Duration::from_millis(500)).await;
@@ -2023,11 +1951,30 @@ async fn evaluate_bool<R: BrowserRuntime>(runtime: &R, script: &str) -> Result<b
     Ok(runtime.evaluate(script).await?.trim() == "true")
 }
 
-async fn wait_for_editor_ready<R: BrowserRuntime>(runtime: &R, timeout: Duration) -> Result<()> {
-    wait_until_true(
+async fn wait_for_wechat_editor_fields<R: BrowserRuntime>(
+    runtime: &R,
+    timeout: Duration,
+) -> Result<()> {
+    wait_until_true_with_context(
         runtime,
-        r#"(() => !!document.querySelector(".js_title") && !!document.querySelector(".ProseMirror"))()"#,
+        r#"(() => {
+            const isVisible = (node) => {
+                if (!node) {
+                    return false;
+                }
+                const rect = node.getBoundingClientRect();
+                if (rect.width <= 0 || rect.height <= 0) {
+                    return false;
+                }
+                const style = getComputedStyle(node);
+                return style.display !== "none" && style.visibility !== "hidden";
+            };
+            return isVisible(document.querySelector(".js_title"))
+                && isVisible(document.querySelector(".ProseMirror"))
+                && isVisible(document.querySelector("#js_cover_area"));
+        })()"#,
         timeout,
+        "wechat editor fields",
     )
     .await
 }
@@ -2080,17 +2027,6 @@ mod tests {
         urls: Arc<Mutex<VecDeque<String>>>,
     }
 
-    impl MockRuntime {
-        fn with_eval_results(results: &[&str]) -> Self {
-            Self {
-                eval_results: Arc::new(Mutex::new(
-                    results.iter().map(|item| item.to_string()).collect(),
-                )),
-                ..Self::default()
-            }
-        }
-    }
-
     #[async_trait]
     impl BrowserRuntime for MockRuntime {
         async fn open(&self, url: &str) -> Result<()> {
@@ -2103,6 +2039,21 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("open_timeout:{url}:{timeout_ms}"));
+            if let Some(error) = self.open_errors.lock().unwrap().pop_front() {
+                return Err(PostpubError::External(error));
+            }
+            Ok(())
+        }
+
+        async fn open_with_wait_until_and_timeout_ms(
+            &self,
+            url: &str,
+            wait_until: &str,
+            timeout_ms: u64,
+        ) -> Result<()> {
+            self.calls.lock().unwrap().push(format!(
+                "open_wait_until_timeout:{url}:{wait_until}:{timeout_ms}"
+            ));
             if let Some(error) = self.open_errors.lock().unwrap().pop_front() {
                 return Err(PostpubError::External(error));
             }
@@ -2131,6 +2082,7 @@ mod tests {
         }
 
         async fn get_url(&self) -> Result<String> {
+            self.calls.lock().unwrap().push("get_url".to_string());
             Ok(self.urls.lock().unwrap().pop_front().unwrap_or_else(|| {
                 "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=123"
                     .to_string()
@@ -2138,10 +2090,12 @@ mod tests {
         }
 
         async fn get_text(&self, _selector: &str) -> Result<String> {
+            self.calls.lock().unwrap().push("get_text:body".to_string());
             Ok(self.texts.lock().unwrap().pop_front().unwrap_or_default())
         }
 
         async fn evaluate(&self, _script: &str) -> Result<String> {
+            self.calls.lock().unwrap().push("evaluate".to_string());
             Ok(self
                 .eval_results
                 .lock()
@@ -2314,11 +2268,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_wechat_dashboard_uses_dashboard_open_timeout() {
-        let runtime = MockRuntime::with_eval_results(&["true"]);
-        runtime.urls.lock().unwrap().push_back(
-            "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=123".to_string(),
-        );
+    async fn open_wechat_dashboard_uses_domcontentloaded_open_timeout() {
+        let runtime = MockRuntime::default();
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured_events = events.clone();
         let reporter = PublishProgressReporter::new(move |stage, message| {
@@ -2331,10 +2282,10 @@ mod tests {
 
         let calls = runtime.calls.lock().unwrap().clone();
         assert!(
-            calls
-                .iter()
-                .any(|entry| entry == "open_timeout:https://mp.weixin.qq.com:15000"),
-            "expected dashboard open timeout to be propagated, got: {calls:?}"
+            calls.iter().any(|entry| {
+                entry == "open_wait_until_timeout:https://mp.weixin.qq.com:domcontentloaded:3000"
+            }),
+            "expected dashboard open to use domcontentloaded wait, got: {calls:?}"
         );
         let recorded = events.lock().unwrap().clone();
         assert!(
@@ -2347,34 +2298,48 @@ mod tests {
 
     #[tokio::test]
     async fn open_wechat_dashboard_continues_after_open_timeout() {
-        let runtime = MockRuntime::with_eval_results(&["true"]);
+        let runtime = MockRuntime::default();
         runtime.open_errors.lock().unwrap().push_back(
-            "agent-browser command timed out after 18s: open https://mp.weixin.qq.com".to_string(),
-        );
-        runtime.urls.lock().unwrap().push_back(
-            "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=123".to_string(),
+            "agent-browser command timed out after 3s: open https://mp.weixin.qq.com --wait-until domcontentloaded".to_string(),
         );
         let reporter = PublishProgressReporter::new(|_, _| {});
 
         open_wechat_dashboard(&runtime, "https://mp.weixin.qq.com", &reporter)
             .await
-            .expect("wechat dashboard should still be inspected after open timeout");
+            .expect("wechat dashboard should continue after open timeout");
     }
 
     #[tokio::test]
-    async fn wait_for_wechat_dashboard_state_reports_last_url_on_timeout() {
-        let runtime = MockRuntime::with_eval_results(&["false"]);
-        runtime.urls.lock().unwrap().push_back(
-            "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=321".to_string(),
-        );
+    async fn open_wechat_dashboard_still_propagates_non_timeout_open_error() {
+        let runtime = MockRuntime::default();
+        runtime
+            .open_errors
+            .lock()
+            .unwrap()
+            .push_back("navigation failed".to_string());
+        let reporter = PublishProgressReporter::new(|_, _| {});
 
-        let error = wait_for_wechat_dashboard_state(&runtime, Duration::from_millis(0))
+        let error = open_wechat_dashboard(&runtime, "https://mp.weixin.qq.com", &reporter)
             .await
-            .expect_err("dashboard wait should time out");
+            .expect_err("non-timeout open error should still be returned");
 
-        let message = error.to_string();
-        assert!(message.contains("wechat dashboard"));
-        assert!(message.contains("token=321"));
+        assert!(error.to_string().contains("navigation failed"));
+    }
+
+    #[tokio::test]
+    async fn open_wechat_dashboard_skips_interactive_wait() {
+        let runtime = MockRuntime::default();
+        let reporter = PublishProgressReporter::new(|_, _| {});
+
+        open_wechat_dashboard(&runtime, "https://mp.weixin.qq.com", &reporter)
+            .await
+            .expect("wechat dashboard should finish after domcontentloaded");
+
+        let calls = runtime.calls.lock().unwrap().clone();
+        assert!(
+            !calls.iter().any(|entry| entry == "evaluate"),
+            "wechat dashboard open should not wait for interactive dashboard, got: {calls:?}"
+        );
     }
 
     #[test]
@@ -2471,15 +2436,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_until_true_with_context_reports_context_and_last_url() {
+        let runtime = MockRuntime::default();
+        runtime.urls.lock().unwrap().push_back(
+            "https://mp.weixin.qq.com/cgi-bin/appmsg?t=media/appmsg_edit_v2".to_string(),
+        );
+        runtime
+            .eval_results
+            .lock()
+            .unwrap()
+            .push_back("false".to_string());
+
+        let error = wait_until_true_with_context(
+            &runtime,
+            "(() => false)()",
+            Duration::from_millis(0),
+            "wechat editor fields",
+        )
+        .await
+        .expect_err("wait should time out");
+
+        let message = error.to_string();
+        assert!(message.contains("wechat editor fields"));
+        assert!(message.contains("appmsg_edit_v2"));
+    }
+
+    #[tokio::test]
     async fn check_login_status_reports_valid_when_token_exists() {
         let temp = tempdir().expect("temp dir");
         let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
         let publisher = WechatPublisher::new(context);
-        let runtime = MockRuntime::with_eval_results(&["true"]);
-        runtime.urls.lock().unwrap().extend([
+        let runtime = MockRuntime::default();
+        runtime.urls.lock().unwrap().push_back(
             "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=456".to_string(),
-            "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=456".to_string(),
-        ]);
+        );
 
         let status = publisher
             .check_login_status_with_runtime(&runtime, &sample_target())
@@ -2492,6 +2482,11 @@ mod tests {
             status.current_url.as_deref(),
             Some("https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN&token=456")
         );
+        let calls = runtime.calls.lock().unwrap().clone();
+        assert!(
+            !calls.iter().any(|entry| entry == "evaluate"),
+            "login status check should not evaluate dashboard readiness, got: {calls:?}"
+        );
     }
 
     #[tokio::test]
@@ -2499,11 +2494,12 @@ mod tests {
         let temp = tempdir().expect("temp dir");
         let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
         let publisher = WechatPublisher::new(context);
-        let runtime = MockRuntime::with_eval_results(&["true"]);
-        runtime.urls.lock().unwrap().extend([
-            "https://mp.weixin.qq.com/".to_string(),
-            "https://mp.weixin.qq.com/".to_string(),
-        ]);
+        let runtime = MockRuntime::default();
+        runtime
+            .urls
+            .lock()
+            .unwrap()
+            .push_back("https://mp.weixin.qq.com/".to_string());
         runtime.texts.lock().unwrap().push_back(
             "登录 使用帐号登录 微信扫一扫，选择该微信下的公众号平台账号登录".to_string(),
         );
@@ -2520,6 +2516,11 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("重新扫码登录"));
+        let calls = runtime.calls.lock().unwrap().clone();
+        assert!(
+            !calls.iter().any(|entry| entry == "evaluate"),
+            "login status check should not wait for interactive dashboard, got: {calls:?}"
+        );
     }
 
     #[tokio::test]
@@ -2527,11 +2528,12 @@ mod tests {
         let temp = tempdir().expect("temp dir");
         let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
         let publisher = WechatPublisher::new(context);
-        let runtime = MockRuntime::with_eval_results(&["true"]);
-        runtime.urls.lock().unwrap().extend([
-            "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN".to_string(),
-            "https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN".to_string(),
-        ]);
+        let runtime = MockRuntime::default();
+        runtime
+            .urls
+            .lock()
+            .unwrap()
+            .push_back("https://mp.weixin.qq.com/cgi-bin/home?t=home/index&lang=zh_CN".to_string());
         runtime
             .texts
             .lock()
@@ -2550,6 +2552,45 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("无法确认登录状态"));
+        let calls = runtime.calls.lock().unwrap().clone();
+        assert!(
+            !calls.iter().any(|entry| entry == "evaluate"),
+            "login status check should not wait for interactive dashboard, got: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_login_status_continues_after_open_timeout_for_qr_page() {
+        let temp = tempdir().expect("temp dir");
+        let context = AppContext::from_root("postpub-core", "0.1.0", temp.path());
+        let publisher = WechatPublisher::new(context);
+        let runtime = MockRuntime::default();
+        runtime.open_errors.lock().unwrap().push_back(
+            "agent-browser command timed out after 3s: open https://mp.weixin.qq.com --wait-until domcontentloaded --timeout 3000".to_string(),
+        );
+        runtime
+            .urls
+            .lock()
+            .unwrap()
+            .push_back("https://mp.weixin.qq.com/".to_string());
+        runtime
+            .texts
+            .lock()
+            .unwrap()
+            .push_back("登录 使用帐号登录 微信扫一扫".to_string());
+
+        let status = publisher
+            .check_login_status_with_runtime(&runtime, &sample_target())
+            .await
+            .expect("login status should still be derived from the current page");
+
+        assert!(!status.valid);
+        assert!(status.needs_login);
+        let calls = runtime.calls.lock().unwrap().clone();
+        assert!(
+            !calls.iter().any(|entry| entry == "evaluate"),
+            "login status check should not wait for interactive dashboard after open timeout, got: {calls:?}"
+        );
     }
 
     #[test]
