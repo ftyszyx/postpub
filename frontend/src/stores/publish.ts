@@ -17,6 +17,14 @@ function normalizeTaskIds(taskIds: string[]): string[] {
   return [...new Set(taskIds.map((taskId) => taskId.trim()).filter(Boolean))];
 }
 
+function isActiveStatus(status: PublishTaskStatus) {
+  return status === "Pending" || status === "Running";
+}
+
+function isFinalStatus(status: PublishTaskStatus) {
+  return status === "Succeeded" || status === "Failed" || status === "Canceled";
+}
+
 export const usePublishStore = defineStore("publish", {
   state: () => ({
     tasks: [] as PublishTaskSummary[],
@@ -43,7 +51,7 @@ export const usePublishStore = defineStore("publish", {
 
         if (
           this.current &&
-          (this.current.status === "Pending" || this.current.status === "Running")
+          isActiveStatus(this.current.status)
         ) {
           this.connectToEvents(this.current.id);
         }
@@ -67,6 +75,28 @@ export const usePublishStore = defineStore("publish", {
         await this.loadTasks();
         this.connectToEvents(nextTask.id);
         return this.current;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : String(error);
+        return null;
+      }
+    },
+
+    async cancelTask(task: PublishTaskSummary) {
+      this.error = "";
+
+      try {
+        const response = await apiPost<ApiResponse<PublishTaskSummary>>(
+          `/api/publish/tasks/${encodeURIComponent(task.id)}/cancel`
+        );
+        const nextTask = normalizeTask(response.data);
+        this.tasks = this.tasks.map((item) => (item.id === nextTask.id ? nextTask : item));
+        if (this.current?.id === nextTask.id) {
+          this.current = nextTask;
+        }
+        this.eventSource?.close();
+        this.eventSource = null;
+        await this.loadTasks();
+        return nextTask;
       } catch (error) {
         this.error = error instanceof Error ? error.message : String(error);
         return null;
@@ -118,7 +148,7 @@ export const usePublishStore = defineStore("publish", {
           `/api/publish/tasks/${encodeURIComponent(taskId)}`
         );
         this.current = normalizeTask(response.data);
-        if (this.current.status === "Pending" || this.current.status === "Running") {
+        if (isActiveStatus(this.current.status)) {
           this.connectToEvents(taskId);
         }
       } catch (error) {
@@ -160,7 +190,7 @@ export const usePublishStore = defineStore("publish", {
             this.current.updated_at = payload.timestamp;
           }
 
-          if (payload.status === "Succeeded" || payload.status === "Failed") {
+          if (isFinalStatus(payload.status)) {
             source.close();
             void this.selectTask(taskId);
             void this.loadTasks();

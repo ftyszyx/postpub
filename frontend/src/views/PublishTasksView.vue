@@ -16,6 +16,7 @@ import {
   EyeOutlined,
   ReloadOutlined,
   SearchOutlined,
+  StopOutlined,
 } from "@ant-design/icons-vue";
 import { useRoute } from "vue-router";
 import { useI18n } from "vue-i18n";
@@ -26,7 +27,7 @@ import type {
   PublishTaskSummary,
 } from "../types/postpub";
 
-type EventDisplayState = "pending" | "current" | "completed" | "failed";
+type EventDisplayState = "pending" | "current" | "completed" | "failed" | "canceled";
 type DisplayEvent = PublishEvent & {
   displayState: EventDisplayState;
 };
@@ -42,6 +43,7 @@ const selectedTaskIds = ref<string[]>([]);
 const deletingTaskIds = ref<string[]>([]);
 const batchDeleting = ref(false);
 const retryingTaskId = ref("");
+const cancelingTaskId = ref("");
 const tablePageSize = ref(20);
 const wechatLoginPromptTaskId = ref("");
 let wechatLoginPromptModal: { destroy: () => void } | null = null;
@@ -96,7 +98,11 @@ function asTask(record: unknown) {
 }
 
 function canDeleteTask(task: PublishTaskSummary) {
-  return task.status === "Succeeded" || task.status === "Failed";
+  return task.status === "Succeeded" || task.status === "Failed" || task.status === "Canceled";
+}
+
+function canCancelTask(task: PublishTaskSummary) {
+  return task.status === "Pending" || task.status === "Running";
 }
 
 function taskTitle(task: PublishTaskSummary) {
@@ -186,10 +192,15 @@ function resolveEventDisplayState(
   taskStatus?: PublishTaskStatus,
 ): EventDisplayState {
   if (index === 0) {
+    if (taskStatus === "Canceled" || event.stage === "canceled") return "canceled";
     if (taskStatus === "Failed" || event.stage === "failed") return "failed";
     if (taskStatus === "Succeeded") return "completed";
     if (taskStatus === "Pending") return "pending";
     return "current";
+  }
+
+  if (event.status === "Canceled" || event.stage === "canceled") {
+    return "canceled";
   }
 
   if (event.status === "Failed" || event.stage === "failed") {
@@ -211,6 +222,8 @@ function eventStateColor(state: EventDisplayState) {
       return "error";
     case "pending":
       return "default";
+    case "canceled":
+      return "warning";
     default:
       return "processing";
   }
@@ -283,12 +296,46 @@ function closeTaskDetail() {
 
 async function retryTask(task: PublishTaskSummary) {
   retryingTaskId.value = task.id;
-  const nextTask = await publishStore.retryTask(task);
-  retryingTaskId.value = "";
-  if (!nextTask) return;
-  selectedTaskId.value = nextTask.id;
-  detailOpen.value = true;
-  message.success(t("publish.retryTaskSuccess"));
+  try {
+    const nextTask = await publishStore.retryTask(task);
+    if (!nextTask) return;
+    selectedTaskId.value = nextTask.id;
+    detailOpen.value = true;
+    message.success(t("publish.retryTaskSuccess"));
+  } finally {
+    retryingTaskId.value = "";
+  }
+}
+
+function isCancelingTask(taskId: string) {
+  return cancelingTaskId.value === taskId;
+}
+
+async function cancelTask(task: PublishTaskSummary) {
+  cancelingTaskId.value = task.id;
+  try {
+    const nextTask = await publishStore.cancelTask(task);
+    if (!nextTask) return;
+    selectedTaskId.value = nextTask.id;
+    message.success(t("publish.cancelTaskSuccess"));
+  } finally {
+    cancelingTaskId.value = "";
+  }
+}
+
+function confirmCancelTask(task: PublishTaskSummary) {
+  AModal.confirm({
+    title: t("publish.cancelTaskTitle"),
+    content: t("publish.cancelTaskPrompt", {
+      title: taskTitle(task),
+    }),
+    okText: t("publish.cancelTask"),
+    cancelText: t("common.cancel"),
+    okButtonProps: { danger: true },
+    onOk: async () => {
+      await cancelTask(task);
+    },
+  });
 }
 
 function isDeletingTask(taskId: string) {
@@ -601,6 +648,8 @@ onBeforeUnmount(() => {
                   ? 'success'
                   : asTask(record).status === 'Failed'
                     ? 'error'
+                    : asTask(record).status === 'Canceled'
+                      ? 'warning'
                     : 'processing'
               "
             >
@@ -623,6 +672,18 @@ onBeforeUnmount(() => {
                   <EyeOutlined />
                 </template>
                 {{ t("publish.viewDetails") }}
+              </AButton>
+              <AButton
+                v-if="canCancelTask(asTask(record))"
+                danger
+                size="small"
+                :loading="isCancelingTask(asTask(record).id)"
+                @click.stop="confirmCancelTask(asTask(record))"
+              >
+                <template #icon>
+                  <StopOutlined />
+                </template>
+                {{ t("publish.cancelTask") }}
               </AButton>
               <AButton
                 v-if="asTask(record).status === 'Failed'"
@@ -784,6 +845,17 @@ onBeforeUnmount(() => {
       <template #footer>
         <ASpace>
           <AButton @click="closeTaskDetail">{{ t("common.close") }}</AButton>
+          <AButton
+            v-if="detailTask && canCancelTask(detailTask)"
+            danger
+            :loading="isCancelingTask(detailTask.id)"
+            @click="confirmCancelTask(detailTask)"
+          >
+            <template #icon>
+              <StopOutlined />
+            </template>
+            {{ t("publish.cancelTask") }}
+          </AButton>
           <AButton
             v-if="detailTask && canDeleteTask(detailTask)"
             danger

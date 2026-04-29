@@ -322,7 +322,7 @@ export interface PublishOutput {
   remote_url?: string;
 }
 
-export type PublishTaskStatus = "Pending" | "Running" | "Succeeded" | "Failed";
+export type PublishTaskStatus = "Pending" | "Running" | "Succeeded" | "Failed" | "Canceled";
 
 export interface PublishEvent {
   task_id: string;

@@ -11,7 +11,10 @@ use postpub_types::{
     GenerateArticleRequest, GenerationEvent, GenerationTaskStatus, GenerationTaskSummary,
     PublishArticleRequest, PublishEvent, PublishOutput, PublishTaskStatus, PublishTaskSummary,
 };
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::{
+    sync::{broadcast, mpsc, RwLock},
+    task::JoinHandle,
+};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -389,6 +392,7 @@ impl GenerationManager {
 pub struct PublishManager {
     tasks: Arc<RwLock<HashMap<String, PublishTaskSummary>>>,
     streams: Arc<RwLock<HashMap<String, broadcast::Sender<PublishEvent>>>>,
+    running_tasks: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
     storage_path: Arc<PathBuf>,
 }
 
@@ -398,6 +402,7 @@ impl PublishManager {
         Self {
             tasks: Arc::new(RwLock::new(restored)),
             streams: Arc::new(RwLock::new(HashMap::new())),
+            running_tasks: Arc::new(RwLock::new(HashMap::new())),
             storage_path: Arc::new(storage_path),
         }
     }
@@ -423,7 +428,7 @@ impl PublishManager {
         self.tasks.write().await.insert(id.clone(), summary.clone());
         self.ensure_stream(&id).await;
         self.persist_tasks().await;
-        self.spawn_task(context, id.clone(), request);
+        self.spawn_task(context, id.clone(), request).await;
 
         summary
     }
@@ -467,14 +472,19 @@ impl PublishManager {
         )
         .await;
 
-        self.spawn_task(context, id.to_string(), request);
+        self.spawn_task(context, id.to_string(), request).await;
 
         self.get_task(id).await.ok_or_else(|| {
             PostpubError::NotFound(format!("publish task not found after retry: {id}"))
         })
     }
 
-    fn spawn_task(&self, context: Arc<AppContext>, id: String, request: PublishArticleRequest) {
+    async fn spawn_task(
+        &self,
+        context: Arc<AppContext>,
+        id: String,
+        request: PublishArticleRequest,
+    ) {
         let manager = self.clone();
         tracing::info!(
             task_id = %id,
@@ -483,7 +493,8 @@ impl PublishManager {
             mode = %request.mode,
             "publish task started"
         );
-        tokio::spawn(async move {
+        let task_id = id.clone();
+        let handle = tokio::spawn(async move {
             manager
                 .push_event(
                     &id,
@@ -548,7 +559,19 @@ impl PublishManager {
                     manager.finish_failure(&id, error.to_string()).await;
                 }
             }
+            manager.running_tasks.write().await.remove(&id);
         });
+        self.running_tasks
+            .write()
+            .await
+            .insert(task_id.clone(), handle);
+        if self
+            .get_task(&task_id)
+            .await
+            .is_some_and(|task| !is_publish_task_active(&task.status))
+        {
+            self.running_tasks.write().await.remove(&task_id);
+        }
     }
 
     async fn ensure_stream(&self, id: &str) -> broadcast::Sender<PublishEvent> {
@@ -589,6 +612,41 @@ impl PublishManager {
         Ok(())
     }
 
+    pub async fn cancel_task(&self, id: &str) -> postpub_core::Result<PublishTaskSummary> {
+        {
+            let tasks = self.tasks.read().await;
+            let Some(task) = tasks.get(id) else {
+                return Err(PostpubError::NotFound(format!(
+                    "publish task not found: {id}"
+                )));
+            };
+
+            if !is_publish_task_active(&task.status) {
+                return Err(PostpubError::Conflict(format!(
+                    "publish task is not running and cannot be canceled: {id}"
+                )));
+            }
+        }
+
+        let handle = self.running_tasks.write().await.remove(id);
+        if let Some(handle) = handle {
+            handle.abort();
+        }
+
+        let message = "发布任务已停止".to_string();
+        {
+            let mut tasks = self.tasks.write().await;
+            if let Some(task) = tasks.get_mut(id) {
+                task.error = Some(message.clone());
+            }
+        }
+        self.push_event(id, "canceled", &message, PublishTaskStatus::Canceled)
+            .await;
+        self.get_task(id).await.ok_or_else(|| {
+            PostpubError::NotFound(format!("publish task not found after cancel: {id}"))
+        })
+    }
+
     pub async fn delete_tasks(&self, ids: &[String]) -> postpub_core::Result<Vec<String>> {
         let normalized_ids = normalize_task_ids(ids);
         if normalized_ids.is_empty() {
@@ -623,6 +681,12 @@ impl PublishManager {
             let mut streams = self.streams.write().await;
             for id in &deleted_ids {
                 streams.remove(id);
+            }
+        }
+        {
+            let mut running_tasks = self.running_tasks.write().await;
+            for id in &deleted_ids {
+                running_tasks.remove(id);
             }
         }
 

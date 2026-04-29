@@ -96,7 +96,7 @@ async fn wait_for_publish_task_completion(app: &Router, task_id: &str) -> Publis
 
         if matches!(
             task.data.status,
-            PublishTaskStatus::Succeeded | PublishTaskStatus::Failed
+            PublishTaskStatus::Succeeded | PublishTaskStatus::Failed | PublishTaskStatus::Canceled
         ) {
             final_task = Some(task.data);
             break;

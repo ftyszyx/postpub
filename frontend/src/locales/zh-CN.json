@@ -389,6 +389,10 @@
     "viewDetails": "查看详情",
     "retryTask": "重试",
     "retryTaskSuccess": "已在当前发布任务上开始重试",
+    "cancelTask": "停止",
+    "cancelTaskTitle": "停止发布任务",
+    "cancelTaskPrompt": "确定停止发布任务“{title}”吗？当前正在执行的浏览器操作会被中断。",
+    "cancelTaskSuccess": "发布任务已停止",
     "selectedCount": "（已选 {count}）",
     "batchDelete": "批量删除",
     "batchDeleteTitle": "删除发布任务",
@@ -419,13 +423,15 @@
       "Pending": "等待中",
       "Running": "运行中",
       "Succeeded": "成功",
-      "Failed": "失败"
+      "Failed": "失败",
+      "Canceled": "已停止"
     },
     "eventStatus": {
       "pending": "等待中",
       "current": "当前执行",
       "completed": "已完成",
-      "failed": "失败"
+      "failed": "失败",
+      "canceled": "已停止"
     },
     "stages": {
       "bootstrap": "任务已接收",

@@ -132,6 +132,89 @@ describe("publish store", () => {
     expect(FakeEventSource.instances[0]?.url).toContain("/api/publish/tasks/publish-task-1/events");
   });
 
+  it("cancels a running publish task and closes the event stream", async () => {
+    const close = vi.spyOn(FakeEventSource.prototype, "close");
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse({
+          success: true,
+          data: {
+            id: "publish-task-1",
+            request: {
+              article_relative_path: "vibecoding.md",
+              target_id: "publish-wechat-1",
+              mode: "draft"
+            },
+            status: "Canceled",
+            created_at: "2026-04-12T00:00:00Z",
+            updated_at: "2026-04-12T00:00:03Z",
+            events: [
+              {
+                task_id: "publish-task-1",
+                stage: "canceled",
+                message: "stopped",
+                status: "Canceled",
+                timestamp: "2026-04-12T00:00:03Z"
+              }
+            ],
+            error: "stopped"
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          success: true,
+          data: [
+            {
+              id: "publish-task-1",
+              request: {
+                article_relative_path: "vibecoding.md",
+                target_id: "publish-wechat-1",
+                mode: "draft"
+              },
+              status: "Canceled",
+              created_at: "2026-04-12T00:00:00Z",
+              updated_at: "2026-04-12T00:00:03Z",
+              events: []
+            }
+          ]
+        })
+      );
+
+    const store = usePublishStore();
+    const task = {
+      id: "publish-task-1",
+      request: {
+        article_relative_path: "vibecoding.md",
+        target_id: "publish-wechat-1",
+        mode: "draft"
+      },
+      status: "Running" as const,
+      created_at: "2026-04-12T00:00:00Z",
+      updated_at: "2026-04-12T00:00:01Z",
+      events: [],
+      output: undefined,
+      error: undefined
+    };
+    store.tasks = [task];
+    store.current = task;
+    store.eventSource = new FakeEventSource("/api/publish/tasks/publish-task-1/events") as never;
+
+    const canceled = await store.cancelTask(task);
+
+    expect(canceled?.status).toBe("Canceled");
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/publish/tasks/publish-task-1/cancel",
+      expect.objectContaining({
+        method: "POST"
+      })
+    );
+    expect(close).toHaveBeenCalled();
+    expect(store.current?.status).toBe("Canceled");
+    expect(store.eventSource).toBeNull();
+  });
+
   it("deletes completed publish tasks from local state", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       jsonResponse({

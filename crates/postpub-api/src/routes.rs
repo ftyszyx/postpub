@@ -117,6 +117,10 @@ pub fn api_router() -> Router<ApiState> {
             "/api/publish/tasks/{task_id}/retry",
             post(retry_publish_task),
         )
+        .route(
+            "/api/publish/tasks/{task_id}/cancel",
+            post(cancel_publish_task),
+        )
         .route("/api/publish/tasks/{task_id}/events", get(publish_events))
 }
 
@@ -611,6 +615,17 @@ async fn retry_publish_task(
     Ok(Json(ApiResponse::with_message(
         task,
         "publish task restarted",
+    )))
+}
+
+async fn cancel_publish_task(
+    State(state): State<ApiState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<ApiResponse<postpub_types::PublishTaskSummary>>, ApiError> {
+    let task = state.publish_manager.cancel_task(&task_id).await?;
+    Ok(Json(ApiResponse::with_message(
+        task,
+        "publish task canceled",
     )))
 }
 

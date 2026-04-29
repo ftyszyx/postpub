@@ -771,6 +771,7 @@ pub enum PublishTaskStatus {
     Running,
     Succeeded,
     Failed,
+    Canceled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

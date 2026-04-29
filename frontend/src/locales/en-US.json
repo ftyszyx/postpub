@@ -389,6 +389,10 @@
     "viewDetails": "View details",
     "retryTask": "Retry",
     "retryTaskSuccess": "Retry started on the current publish task",
+    "cancelTask": "Stop",
+    "cancelTaskTitle": "Stop publish task",
+    "cancelTaskPrompt": "Stop publish task \"{title}\"? Any browser operation currently in progress will be interrupted.",
+    "cancelTaskSuccess": "Publish task stopped",
     "selectedCount": "({count} selected)",
     "batchDelete": "Batch delete",
     "batchDeleteTitle": "Delete publish tasks",
@@ -419,13 +423,15 @@
       "Pending": "Pending",
       "Running": "Running",
       "Succeeded": "Succeeded",
-      "Failed": "Failed"
+      "Failed": "Failed",
+      "Canceled": "Stopped"
     },
     "eventStatus": {
       "pending": "Pending",
       "current": "Current",
       "completed": "Completed",
-      "failed": "Failed"
+      "failed": "Failed",
+      "canceled": "Stopped"
     },
     "stages": {
       "bootstrap": "Task accepted",

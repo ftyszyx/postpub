@@ -11,6 +11,8 @@ use postpub_types::{
     PublishTargetConfig, PublishTargetLoginStatus,
 };
 use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::{
     process::Command,
     time::{sleep, timeout, Instant},
@@ -53,18 +55,85 @@ struct WechatCoverRequest {
 struct WechatPublishPlan {
     title: String,
     body_html: String,
+    digest: String,
     format: String,
     cover: WechatCoverRequest,
 }
 
-impl WechatCoverPlan {
-    fn description(&self) -> &'static str {
-        match self {
-            Self::Upload(_) => "本地文件上传",
-            Self::BodyFirstImage => "从正文选择首图",
-            Self::PlatformAi => "公众号 AI 配图",
-        }
-    }
+#[derive(Debug, Clone)]
+struct WechatDraftState {
+    appmsgid: String,
+    data_seq: String,
+    content_html: String,
+    cover: Option<WechatCoverState>,
+}
+
+#[derive(Debug, Clone)]
+struct WechatCoverState {
+    cdn_url: String,
+    cdn_235_1_url: String,
+    cdn_1_1_url: String,
+    original_url: String,
+    crop_list: String,
+    fileid: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct WechatBaseResp {
+    ret: Option<Value>,
+    err_msg: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct WechatDraftApiResponse {
+    #[serde(default)]
+    base_resp: Option<WechatBaseResp>,
+    #[serde(default)]
+    ret: Option<Value>,
+    #[serde(default, rename = "appMsgId")]
+    app_msg_id: Option<Value>,
+    #[serde(default, rename = "AppMsgId")]
+    app_msg_id_alt: Option<Value>,
+    #[serde(default)]
+    data_seq: Option<Value>,
+    #[serde(default)]
+    filter_content_html: Option<Vec<WechatFilteredContent>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct WechatFilteredContent {
+    #[serde(default)]
+    content: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WechatCropMultiResponse {
+    #[serde(default)]
+    base_resp: Option<WechatBaseResp>,
+    #[serde(default)]
+    result: Vec<WechatCropResult>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WechatCropResult {
+    #[serde(default)]
+    cdnurl: String,
+    #[serde(default)]
+    file_id: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct WechatMassSendPageResponse {
+    #[serde(default)]
+    base_resp: Option<WechatBaseResp>,
+    #[serde(default)]
+    operation_seq: String,
+    #[serde(default)]
+    mass_send_left: Option<i64>,
+    #[serde(default)]
+    strategy_info: String,
+    #[serde(default)]
+    scene_replace: String,
 }
 
 impl WechatPublisher {
@@ -162,12 +231,6 @@ impl WechatPublisher {
         request: &PublishArticleRequest,
         reporter: &PublishProgressReporter,
     ) -> Result<PublishOutput> {
-        if request.mode.trim().eq_ignore_ascii_case("publish") {
-            return Err(PostpubError::Validation(
-                "wechat publish mode is not implemented yet; use draft mode first".to_string(),
-            ));
-        }
-
         let origin = wechat_origin(&target.publish_url)?;
 
         reporter.report("wechat.browser", "starting agent-browser session");
@@ -176,56 +239,54 @@ impl WechatPublisher {
 
         let token = ensure_wechat_login_token(runtime, target, reporter).await?;
 
+        reporter.report(
+            "wechat.editor.bootstrap",
+            "opening editor to initialize wechat web api context",
+        );
         open_wechat_editor(runtime, &origin, &token, reporter).await?;
         wait_for_wechat_editor_fields(runtime, Duration::from_secs(8)).await?;
 
-        reporter.report("wechat.title", "填写文章标题");
-        runtime.fill(".js_title", &plan.title).await?;
+        reporter.report("wechat.api.create", "creating wechat draft through web api");
+        let mut draft = create_wechat_draft_via_api(runtime, &origin, &token, target, plan).await?;
 
-        if !target.account_name.trim().is_empty() {
-            reporter.report("wechat.author", "填写作者信息");
-            runtime
-                .fill(".js_author", target.account_name.trim())
-                .await?;
+        match &plan.cover.plan {
+            WechatCoverPlan::BodyFirstImage => {
+                reporter.report("wechat.api.cover", "setting wechat cover through web api");
+                let cover_state =
+                    create_wechat_cover_state_via_api(runtime, &origin, &plan.cover, plan).await?;
+                draft.cover = Some(cover_state);
+                draft = update_wechat_draft_via_api(runtime, &origin, &token, target, plan, &draft)
+                    .await?;
+            }
+            WechatCoverPlan::Upload(path) => {
+                return Err(PostpubError::Validation(format!(
+                    "wechat web api local cover upload is not implemented yet: {}",
+                    path.display()
+                )));
+            }
+            WechatCoverPlan::PlatformAi => {
+                return Err(PostpubError::Validation(
+                    "wechat web api platform AI cover generation is not implemented yet"
+                        .to_string(),
+                ));
+            }
         }
 
-        reporter.report("wechat.body", "写入文章正文");
-        set_editor_html(runtime, &plan.body_html).await?;
+        let remote_url = Some(format!(
+            "{origin}/cgi-bin/appmsg?t=media/appmsg_edit&action=edit&reprint_confirm=0&type=77&appmsgid={}&token={token}&lang=zh_CN",
+            draft.appmsgid
+        ));
+        let remote_id = Some(draft.appmsgid.clone());
 
-        reporter.report("wechat.cover", "打开封面选择面板");
-        click_first_visible_selector(
-            runtime,
-            &[
-                "#js_cover_area .js_cover_btn_area",
-                "#js_cover_area #js_cover_null",
-                "#js_cover_area",
-            ],
-        )
-        .await?;
-        wait_for_any_visible_selector(
-            runtime,
-            &[
-                "#js_cover_area #js_cover_null .js_imagedialog",
-                "#js_cover_area .js_cover_opr .js_imagedialog",
-            ],
-            Duration::from_secs(10),
-        )
-        .await?;
+        if request.mode.trim().eq_ignore_ascii_case("publish") {
+            reporter.report(
+                "wechat.api.prepublish",
+                "running wechat pre-publish web api checks",
+            );
+            prepublish_wechat_draft_via_api(runtime, &origin, &token, &draft).await?;
+        }
 
-        apply_wechat_cover(runtime, &plan.cover, reporter).await?;
-
-        apply_wechat_publish_settings(runtime, target, reporter).await?;
-
-        reporter.report("wechat.save", "保存为草稿");
-        click_by_text(runtime, "保存为草稿", true).await?;
-        wait_for_text(runtime, "手动保存", Duration::from_secs(20)).await?;
-
-        let remote_url = Some(runtime.get_url().await?);
-        let remote_id = remote_url
-            .as_deref()
-            .and_then(|url| extract_query_value(url, "appmsgid"));
-
-        reporter.report("wechat.done", "微信公众号草稿保存完成");
+        reporter.report("wechat.done", "wechat draft saved through web api");
         Ok(PublishOutput {
             article_relative_path: request.article_relative_path.clone(),
             article_title: plan.title.clone(),
@@ -361,11 +422,13 @@ fn build_wechat_publish_plan(
 
     let title = article_title(article, variant);
     let body_html = article_body_html(article, variant);
+    let digest = build_wechat_digest(&body_html);
     let cover = resolve_wechat_cover_request(context, target, article, &body_html)?;
 
     Ok(WechatPublishPlan {
         title,
         body_html,
+        digest,
         format: variant.summary.format.clone(),
         cover,
     })
@@ -839,6 +902,7 @@ fn resolve_wechat_cover_size(target: &PublishTargetConfig) -> Result<WechatCover
     Ok(WechatCoverSize { width, height })
 }
 
+#[cfg(test)]
 fn resolve_wechat_cover_path(
     context: &AppContext,
     target: &PublishTargetConfig,
@@ -938,6 +1002,12 @@ fn resolve_local_cover_path(
 }
 
 fn validate_wechat_supported_settings(target: &PublishTargetConfig) -> Result<()> {
+    if target.wechat.declare_original {
+        return Err(PostpubError::Validation(
+            "wechat original declaration is not implemented for web api publishing yet".to_string(),
+        ));
+    }
+
     if target.wechat.enable_reward {
         return Err(PostpubError::Validation(
             "wechat reward automation is not implemented yet".to_string(),
@@ -956,7 +1026,463 @@ fn validate_wechat_supported_settings(target: &PublishTargetConfig) -> Result<()
         ));
     }
 
+    if !target.wechat.source_label.trim().is_empty() {
+        return Err(PostpubError::Validation(
+            "wechat creation source declaration is not implemented for web api publishing yet"
+                .to_string(),
+        ));
+    }
+
+    if !target.wechat.platform_recommendation_enabled {
+        return Err(PostpubError::Validation(
+            "wechat platform recommendation toggle is not implemented for web api publishing yet"
+                .to_string(),
+        ));
+    }
+
+    match target.wechat.comment_mode.trim() {
+        "auto_selected_open" | "open_all" | "closed" => {}
+        other => {
+            return Err(PostpubError::Validation(format!(
+                "unsupported wechat comment mode: {other}"
+            )))
+        }
+    }
+
     Ok(())
+}
+
+async fn create_wechat_draft_via_api<R: BrowserRuntime>(
+    runtime: &R,
+    origin: &str,
+    token: &str,
+    target: &PublishTargetConfig,
+    plan: &WechatPublishPlan,
+) -> Result<WechatDraftState> {
+    let url = format!(
+        "{origin}/cgi-bin/operate_appmsg?t=ajax-response&sub=create&type=77&token={token}&lang=zh_CN"
+    );
+    let fields = build_wechat_appmsg_fields(target, plan, None);
+    let response = wechat_fetch_form(runtime, &url, &fields).await?;
+    let parsed: WechatDraftApiResponse = serde_json::from_str(&response)?;
+    parse_wechat_draft_response(parsed, plan, None)
+}
+
+async fn update_wechat_draft_via_api<R: BrowserRuntime>(
+    runtime: &R,
+    origin: &str,
+    token: &str,
+    target: &PublishTargetConfig,
+    plan: &WechatPublishPlan,
+    draft: &WechatDraftState,
+) -> Result<WechatDraftState> {
+    let url = format!(
+        "{origin}/cgi-bin/operate_appmsg?t=ajax-response&sub=update&type=77&token={token}&lang=zh_CN"
+    );
+    let fields = build_wechat_appmsg_fields(target, plan, Some(draft));
+    let response = wechat_fetch_form(runtime, &url, &fields).await?;
+    let parsed: WechatDraftApiResponse = serde_json::from_str(&response)?;
+    parse_wechat_draft_response(parsed, plan, Some(draft))
+}
+
+fn build_wechat_appmsg_fields(
+    target: &PublishTargetConfig,
+    plan: &WechatPublishPlan,
+    draft: Option<&WechatDraftState>,
+) -> Vec<(String, String)> {
+    let mut fields = vec![
+        ("count".to_string(), "1".to_string()),
+        ("title0".to_string(), plan.title.clone()),
+        (
+            "author0".to_string(),
+            target.account_name.trim().to_string(),
+        ),
+        ("digest0".to_string(), plan.digest.clone()),
+        (
+            "content0".to_string(),
+            draft
+                .map(|state| state.content_html.clone())
+                .unwrap_or_else(|| plan.body_html.clone()),
+        ),
+        ("need_open_comment0".to_string(), need_open_comment(target)),
+        ("reply_flag0".to_string(), "2".to_string()),
+        (
+            "auto_elect_comment0".to_string(),
+            auto_elect_comment(target),
+        ),
+        ("auto_elect_reply0".to_string(), auto_elect_comment(target)),
+    ];
+
+    if !target.wechat.source_url.trim().is_empty() {
+        fields.push((
+            "sourceurl0".to_string(),
+            target.wechat.source_url.trim().to_string(),
+        ));
+    }
+    if let Some(state) = draft {
+        fields.extend([
+            ("AppMsgId".to_string(), state.appmsgid.clone()),
+            ("data_seq".to_string(), state.data_seq.clone()),
+            ("operate_from".to_string(), "Chrome".to_string()),
+            ("isnew".to_string(), "0".to_string()),
+            ("articlenum".to_string(), "1".to_string()),
+        ]);
+
+        if let Some(cover) = &state.cover {
+            fields.extend([
+                ("cdn_url0".to_string(), cover.cdn_url.clone()),
+                ("cdn_235_1_url0".to_string(), cover.cdn_235_1_url.clone()),
+                ("cdn_1_1_url0".to_string(), cover.cdn_1_1_url.clone()),
+                ("cdn_3_4_url0".to_string(), String::new()),
+                ("cdn_16_9_url0".to_string(), String::new()),
+                ("cdn_url_back0".to_string(), cover.original_url.clone()),
+                ("crop_list0".to_string(), cover.crop_list.clone()),
+                ("fileid0".to_string(), cover.fileid.clone()),
+                ("last_choose_cover_from0".to_string(), "0".to_string()),
+            ]);
+        }
+    }
+
+    fields
+}
+
+fn need_open_comment(target: &PublishTargetConfig) -> String {
+    if target.wechat.comment_mode.trim() == "closed" {
+        "0"
+    } else {
+        "1"
+    }
+    .to_string()
+}
+
+fn auto_elect_comment(target: &PublishTargetConfig) -> String {
+    if target.wechat.comment_mode.trim() == "auto_selected_open" {
+        "1"
+    } else {
+        "0"
+    }
+    .to_string()
+}
+
+async fn create_wechat_cover_state_via_api<R: BrowserRuntime>(
+    runtime: &R,
+    origin: &str,
+    cover: &WechatCoverRequest,
+    plan: &WechatPublishPlan,
+) -> Result<WechatCoverState> {
+    let image_url = match find_first_wechat_body_image_url(&plan.body_html) {
+        Some(url) => url,
+        None => {
+            return Err(PostpubError::Validation(
+                "wechat first_image cover strategy requires an image in article body".to_string(),
+            ))
+        }
+    };
+
+    if !image_url.contains("mmbiz.qpic.cn") {
+        return Err(PostpubError::Validation(format!(
+            "wechat web api cover from body currently requires a wechat CDN image, got: {image_url}"
+        )));
+    }
+
+    let mut fields = vec![
+        ("imgurl".to_string(), image_url.clone()),
+        ("size_count".to_string(), "2".to_string()),
+    ];
+    fields.extend(crop_fields(
+        "size0",
+        cover_ratio_crop_percent(cover.size.width, cover.size.height),
+    ));
+    fields.extend(crop_fields("size1", (0.0, 0.0, 1.0, 1.0)));
+
+    let response = wechat_fetch_form(
+        runtime,
+        &format!("{origin}/cgi-bin/cropimage?action=crop_multi"),
+        &fields,
+    )
+    .await?;
+    let parsed: WechatCropMultiResponse = serde_json::from_str(&response)?;
+    ensure_wechat_base_response_ok(parsed.base_resp.as_ref(), &response)?;
+    if parsed.result.len() < 2 {
+        return Err(PostpubError::External(format!(
+            "wechat crop_multi returned {} result(s), expected 2: {response}",
+            parsed.result.len()
+        )));
+    }
+
+    let first = &parsed.result[0];
+    let second = &parsed.result[1];
+    let first_file_id = value_to_string(&first.file_id).unwrap_or_default();
+    let second_file_id = value_to_string(&second.file_id).unwrap_or_default();
+    let crop_list = serde_json::json!({
+        "crop_list": [
+            {
+                "ratio": "2.35_1",
+                "x1": 0,
+                "y1": 0,
+                "x2": 0,
+                "y2": 0,
+                "file_id": first_file_id
+            },
+            {
+                "ratio": "1_1",
+                "x1": 0,
+                "y1": 0,
+                "x2": 0,
+                "y2": 0,
+                "file_id": second_file_id
+            }
+        ],
+        "crop_list_percent": [
+            {
+                "ratio": "2.35_1",
+                "x1": 0,
+                "y1": 0,
+                "x2": 1,
+                "y2": 1
+            },
+            {
+                "ratio": "1_1",
+                "x1": 0,
+                "y1": 0,
+                "x2": 1,
+                "y2": 1
+            }
+        ]
+    })
+    .to_string();
+
+    Ok(WechatCoverState {
+        cdn_url: first.cdnurl.clone(),
+        cdn_235_1_url: first.cdnurl.clone(),
+        cdn_1_1_url: second.cdnurl.clone(),
+        original_url: image_url,
+        crop_list,
+        fileid: first_file_id,
+    })
+}
+
+async fn prepublish_wechat_draft_via_api<R: BrowserRuntime>(
+    runtime: &R,
+    origin: &str,
+    token: &str,
+    draft: &WechatDraftState,
+) -> Result<()> {
+    let page_url = format!(
+        "{origin}/cgi-bin/masssendpage?f=json&preview_appmsgid={}&token={token}&lang=zh_CN&ajax=1&random={}",
+        draft.appmsgid,
+        Utc::now().timestamp_millis()
+    );
+    let page_response = wechat_fetch_get(runtime, &page_url).await?;
+    let page: WechatMassSendPageResponse = serde_json::from_str(&page_response)?;
+    ensure_wechat_base_response_ok(page.base_resp.as_ref(), &page_response)?;
+    if page.mass_send_left == Some(0) {
+        return Err(PostpubError::Conflict(
+            "wechat publish quota is exhausted for this account".to_string(),
+        ));
+    }
+    if page.operation_seq.trim().is_empty() {
+        return Err(PostpubError::External(format!(
+            "wechat masssendpage did not return operation_seq: {page_response}"
+        )));
+    }
+    if !page.strategy_info.trim().is_empty() {
+        return Err(PostpubError::Conflict(format!(
+            "wechat publish requires account safety verification before final submit: {}",
+            page.strategy_info
+        )));
+    }
+    if !page.scene_replace.trim().is_empty() {
+        return Err(PostpubError::Conflict(format!(
+            "wechat publish requires scene replacement confirmation before final submit: {}",
+            page.scene_replace
+        )));
+    }
+
+    Err(PostpubError::Validation(
+        "wechat final publish submit is intentionally disabled until a real account verification run confirms masssend parameters; draft has been saved successfully".to_string(),
+    ))
+}
+
+fn parse_wechat_draft_response(
+    response: WechatDraftApiResponse,
+    plan: &WechatPublishPlan,
+    previous: Option<&WechatDraftState>,
+) -> Result<WechatDraftState> {
+    let raw = serde_json::to_string(&response)?;
+    ensure_wechat_base_response_ok(response.base_resp.as_ref(), &raw)?;
+    if let Some(ret) = response.ret.as_ref().and_then(value_to_string) {
+        if ret != "0" {
+            return Err(PostpubError::External(format!(
+                "wechat operate_appmsg returned ret={ret}: {raw}"
+            )));
+        }
+    }
+
+    let appmsgid = response
+        .app_msg_id
+        .as_ref()
+        .or(response.app_msg_id_alt.as_ref())
+        .and_then(value_to_string)
+        .or_else(|| previous.map(|state| state.appmsgid.clone()))
+        .ok_or_else(|| {
+            PostpubError::External(format!(
+                "wechat operate_appmsg response missing appMsgId: {raw}"
+            ))
+        })?;
+    let data_seq = response
+        .data_seq
+        .as_ref()
+        .and_then(value_to_string)
+        .or_else(|| previous.map(|state| state.data_seq.clone()))
+        .ok_or_else(|| {
+            PostpubError::External(format!(
+                "wechat operate_appmsg response missing data_seq: {raw}"
+            ))
+        })?;
+    let content_html = response
+        .filter_content_html
+        .as_ref()
+        .and_then(|items| items.first())
+        .map(|item| item.content.clone())
+        .filter(|content| !content.trim().is_empty())
+        .or_else(|| previous.map(|state| state.content_html.clone()))
+        .unwrap_or_else(|| plan.body_html.clone());
+
+    Ok(WechatDraftState {
+        appmsgid,
+        data_seq,
+        content_html,
+        cover: previous.and_then(|state| state.cover.clone()),
+    })
+}
+
+fn ensure_wechat_base_response_ok(base_resp: Option<&WechatBaseResp>, raw: &str) -> Result<()> {
+    let Some(base_resp) = base_resp else {
+        return Ok(());
+    };
+    let ret = base_resp.ret.as_ref().and_then(value_to_string);
+    if ret.as_deref().is_some_and(|value| value != "0") {
+        let err_msg = base_resp.err_msg.clone().unwrap_or_default();
+        return Err(PostpubError::External(format!(
+            "wechat api returned base_resp ret={} err_msg={}: {raw}",
+            ret.unwrap_or_default(),
+            err_msg
+        )));
+    }
+    Ok(())
+}
+
+async fn wechat_fetch_get<R: BrowserRuntime>(runtime: &R, url: &str) -> Result<String> {
+    let url_json = serde_json::to_string(url)?;
+    let script = format!(
+        r#"
+(async () => {{
+  const response = await fetch({url_json}, {{
+    credentials: "include",
+    headers: {{ "X-Requested-With": "XMLHttpRequest" }}
+  }});
+  const text = await response.text();
+  if (!response.ok) {{
+    throw new Error(`HTTP ${{response.status}} ${{response.statusText}}: ${{text}}`);
+  }}
+  return text;
+}})()
+"#
+    );
+    runtime.evaluate(&script).await
+}
+
+async fn wechat_fetch_form<R: BrowserRuntime>(
+    runtime: &R,
+    url: &str,
+    fields: &[(String, String)],
+) -> Result<String> {
+    let url_json = serde_json::to_string(url)?;
+    let fields_json = serde_json::to_string(fields)?;
+    let script = format!(
+        r#"
+(async () => {{
+  const fields = {fields_json};
+  const body = new URLSearchParams();
+  for (const [key, value] of fields) {{
+    body.append(key, value ?? "");
+  }}
+  const response = await fetch({url_json}, {{
+    method: "POST",
+    credentials: "include",
+    headers: {{
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      "X-Requested-With": "XMLHttpRequest"
+    }},
+    body
+  }});
+  const text = await response.text();
+  if (!response.ok) {{
+    throw new Error(`HTTP ${{response.status}} ${{response.statusText}}: ${{text}}`);
+  }}
+  return text;
+}})()
+"#
+    );
+    runtime.evaluate(&script).await
+}
+
+fn build_wechat_digest(html: &str) -> String {
+    let tags = Regex::new(r"<[^>]+>").expect("html tag regex");
+    tags.replace_all(html, " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(120)
+        .collect()
+}
+
+fn find_first_wechat_body_image_url(html: &str) -> Option<String> {
+    let regex = Regex::new(r#"(?is)<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']"#).ok()?;
+    regex
+        .captures(html)
+        .and_then(|captures| captures.get(1))
+        .map(|match_| match_.as_str().trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn cover_ratio_crop_percent(width: u32, height: u32) -> (f64, f64, f64, f64) {
+    let ratio = width as f64 / height as f64;
+    if ratio > 1.0 {
+        (0.0, 0.0, 1.0, 1.0 / ratio)
+    } else {
+        (0.0, 0.0, ratio, 1.0)
+    }
+}
+
+fn crop_fields(prefix: &str, crop: (f64, f64, f64, f64)) -> Vec<(String, String)> {
+    vec![
+        (format!("{prefix}_x1"), format_crop_percent(crop.0)),
+        (format!("{prefix}_y1"), format_crop_percent(crop.1)),
+        (format!("{prefix}_x2"), format_crop_percent(crop.2)),
+        (format!("{prefix}_y2"), format_crop_percent(crop.3)),
+    ]
+}
+
+fn format_crop_percent(value: f64) -> String {
+    let value = value.clamp(0.0, 1.0);
+    if value == 0.0 || value == 1.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.6}")
+    }
+}
+
+fn value_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Null => None,
+        other => Some(other.to_string()),
+    }
 }
 
 async fn open_wechat_editor<R: BrowserRuntime>(
@@ -996,6 +1522,39 @@ fn should_continue_after_open_timeout(error: &PostpubError) -> bool {
             if message.contains("agent-browser command timed out after")
                 && message.contains("open ")
     )
+}
+
+async fn open_url_with_domcontentloaded<R: BrowserRuntime>(
+    runtime: &R,
+    url: &str,
+    timeout_ms: u64,
+) -> Result<()> {
+    runtime
+        .open_with_wait_until_and_timeout_ms(url, "domcontentloaded", timeout_ms)
+        .await
+}
+
+async fn open_wechat_url<R: BrowserRuntime>(
+    runtime: &R,
+    url: &str,
+    reporter: &PublishProgressReporter,
+    stage_prefix: &str,
+) -> Result<()> {
+    if let Err(error) =
+        open_url_with_domcontentloaded(runtime, url, WECHAT_NAVIGATION_DOM_READY_TIMEOUT_MS).await
+    {
+        if should_continue_after_open_timeout(&error) {
+            reporter.report(
+                format!("{stage_prefix}.open_timeout"),
+                format!("wechat navigation timed out, continuing with current page state: {error}"),
+            );
+            return Ok(());
+        }
+
+        return Err(error);
+    }
+
+    Ok(())
 }
 
 async fn ensure_wechat_login_token<R: BrowserRuntime>(
@@ -1070,830 +1629,6 @@ async fn wait_for_wechat_login_token<R: BrowserRuntime>(
         }
 
         runtime.wait_ms(poll_interval.as_millis() as u64).await?;
-    }
-}
-
-async fn apply_wechat_publish_settings<R: BrowserRuntime>(
-    runtime: &R,
-    target: &PublishTargetConfig,
-    reporter: &PublishProgressReporter,
-) -> Result<()> {
-    reporter.report("wechat.settings", "应用微信公众号平台设置");
-
-    if target.wechat.declare_original {
-        reporter.report("wechat.settings.original", "处理原创声明");
-        open_wechat_setting(runtime, "原创").await?;
-        runtime.wait_ms(500).await?;
-        click_any_text(runtime, &["声明原创", "原创"], true).await?;
-        click_any_text(runtime, &["确定", "确认", "保存"], true).await?;
-        runtime.wait_ms(500).await?;
-    }
-
-    if target.wechat.comment_mode.trim() != "auto_selected_open" {
-        reporter.report("wechat.settings.comment", "更新留言设置");
-        open_wechat_setting(runtime, "留言").await?;
-        runtime.wait_ms(500).await?;
-        let option_text = match target.wechat.comment_mode.trim() {
-            "open_all" => "全部开放",
-            "closed" => "关闭",
-            other => {
-                return Err(PostpubError::Validation(format!(
-                    "unsupported wechat comment mode: {other}"
-                )))
-            }
-        };
-        click_any_text(runtime, &[option_text], true).await?;
-        click_any_text(runtime, &["确定", "确认", "保存"], true).await?;
-        runtime.wait_ms(500).await?;
-    }
-
-    if !target.wechat.source_url.trim().is_empty() {
-        reporter.report("wechat.settings.source_url", "填写原文链接");
-        open_wechat_setting(runtime, "原文链接").await?;
-        runtime.wait_ms(500).await?;
-        fill_first_visible_text_input(runtime, Some("原文"), target.wechat.source_url.trim())
-            .await?;
-        click_any_text(runtime, &["确定", "确认", "保存"], true).await?;
-        runtime.wait_ms(500).await?;
-    }
-
-    if !target.wechat.source_label.trim().is_empty() {
-        reporter.report("wechat.settings.source_label", "填写创作来源");
-        open_wechat_setting(runtime, "创作来源").await?;
-        runtime.wait_ms(500).await?;
-        fill_first_visible_text_input(runtime, Some("来源"), target.wechat.source_label.trim())
-            .await?;
-        click_any_text(runtime, &["确定", "确认", "保存"], true).await?;
-        runtime.wait_ms(500).await?;
-    }
-
-    if !target.wechat.platform_recommendation_enabled {
-        reporter.report("wechat.settings.recommendation", "关闭平台推荐");
-        set_wechat_row_switch(runtime, "平台推荐", false).await?;
-        runtime.wait_ms(500).await?;
-    }
-
-    Ok(())
-}
-
-async fn apply_wechat_cover<R: BrowserRuntime>(
-    runtime: &R,
-    cover: &WechatCoverRequest,
-    reporter: &PublishProgressReporter,
-) -> Result<()> {
-    reporter.report(
-        "wechat.cover.size",
-        format!(
-            "targeting wechat cover size {}x{}",
-            cover.size.width, cover.size.height
-        ),
-    );
-    reporter.report(
-        "wechat.cover.method",
-        match &cover.plan {
-            WechatCoverPlan::Upload(path) => {
-                format!(
-                    "通过{}设置封面：{}",
-                    cover.plan.description(),
-                    path.display()
-                )
-            }
-            _ => format!("通过{}设置封面", cover.plan.description()),
-        },
-    );
-
-    ensure_wechat_cover_picker_open(runtime).await?;
-
-    match &cover.plan {
-        WechatCoverPlan::Upload(path) => upload_wechat_cover_file(runtime, path).await?,
-        WechatCoverPlan::BodyFirstImage => {
-            select_wechat_cover_from_article_with_size(runtime, cover.size).await?
-        }
-        WechatCoverPlan::PlatformAi => {
-            select_wechat_cover_with_ai_with_size(runtime, cover.size).await?
-        }
-    }
-
-    wait_for_wechat_cover_preview(runtime, Duration::from_secs(20)).await?;
-    reporter.report(
-        "wechat.cover.ready",
-        format!("封面已通过{}设置完成", cover.plan.description()),
-    );
-    Ok(())
-}
-
-async fn click_by_text<R: BrowserRuntime>(runtime: &R, text: &str, exact: bool) -> Result<()> {
-    let matcher = serde_json::to_string(text)?;
-    let script = format!(
-        r#"
-(() => {{
-  const expected = {matcher};
-  const exact = {exact};
-  const normalize = (input) => (input || "").replace(/\s+/g, " ").trim();
-  const isVisible = (node) => {{
-    if (!node) {{
-      return false;
-    }}
-    const rect = node.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  }};
-  const rank = (node) => {{
-    const tag = (node.tagName || "").toLowerCase();
-    if (tag === "button" || tag === "a") {{
-      return 0;
-    }}
-    if ((node.getAttribute("role") || "").toLowerCase() === "button") {{
-      return 1;
-    }}
-    if (node.hasAttribute("tabindex")) {{
-      return 2;
-    }}
-    if (tag === "li") {{
-      return 3;
-    }}
-    return 4;
-  }};
-  const seen = new Set();
-  const nodes = Array.from(document.querySelectorAll("a,button,div,li,span"));
-  const candidate = nodes
-    .filter((node) => {{
-      const rect = node.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) {{
-        return false;
-      }}
-      const value = normalize(node.innerText || node.textContent || "");
-      return exact ? value === expected : value.includes(expected);
-    }})
-    .map((node) => {{
-      const target =
-        node.closest('button,a,[role="button"],[tabindex],li') || node;
-      if (!isVisible(target)) {{
-        return null;
-      }}
-      const value = normalize(target.innerText || target.textContent || node.innerText || node.textContent || "");
-      if (seen.has(target)) {{
-        return null;
-      }}
-      seen.add(target);
-      const rect = target.getBoundingClientRect();
-      return {{
-        target,
-        value,
-        rank: rank(target),
-        area: rect.width * rect.height,
-      }};
-    }})
-    .filter(Boolean)
-    .sort((left, right) => {{
-      return left.rank - right.rank || left.value.length - right.value.length || right.area - left.area;
-    }})[0];
-  if (!candidate) {{
-    return false;
-  }}
-  const target = candidate.target;
-  target.scrollIntoView({{ block: "center", inline: "center" }});
-  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {{
-    target.dispatchEvent(
-      new MouseEvent(type, {{ bubbles: true, cancelable: true, view: window }})
-    );
-  }}
-  if (typeof target.click === "function") {{
-    target.click();
-  }}
-  return true;
-}})()
-"#
-    );
-
-    if evaluate_bool(runtime, &script).await? {
-        Ok(())
-    } else {
-        Err(PostpubError::External(format!(
-            "failed to click wechat element by text: {text}"
-        )))
-    }
-}
-
-async fn click_any_text<R: BrowserRuntime>(
-    runtime: &R,
-    candidates: &[&str],
-    exact: bool,
-) -> Result<()> {
-    let mut failures = Vec::new();
-    for candidate in candidates {
-        match click_by_text(runtime, candidate, exact).await {
-            Ok(()) => return Ok(()),
-            Err(error) => failures.push(format!("{candidate}: {error}")),
-        }
-    }
-
-    Err(PostpubError::External(format!(
-        "failed to click any wechat text target: {}",
-        failures.join(" | ")
-    )))
-}
-
-async fn open_url_with_domcontentloaded<R: BrowserRuntime>(
-    runtime: &R,
-    url: &str,
-    timeout_ms: u64,
-) -> Result<()> {
-    runtime
-        .open_with_wait_until_and_timeout_ms(url, "domcontentloaded", timeout_ms)
-        .await
-}
-
-async fn open_wechat_url<R: BrowserRuntime>(
-    runtime: &R,
-    url: &str,
-    reporter: &PublishProgressReporter,
-    stage_prefix: &str,
-) -> Result<()> {
-    if let Err(error) =
-        open_url_with_domcontentloaded(runtime, url, WECHAT_NAVIGATION_DOM_READY_TIMEOUT_MS).await
-    {
-        if should_continue_after_open_timeout(&error) {
-            reporter.report(
-                format!("{stage_prefix}.open_timeout"),
-                format!("wechat navigation timed out, continuing with current page state: {error}"),
-            );
-            return Ok(());
-        }
-
-        return Err(error);
-    }
-
-    Ok(())
-}
-
-async fn open_wechat_setting<R: BrowserRuntime>(runtime: &R, label: &str) -> Result<()> {
-    click_by_text(runtime, label, false).await
-}
-
-async fn fill_first_visible_text_input<R: BrowserRuntime>(
-    runtime: &R,
-    hint: Option<&str>,
-    value: &str,
-) -> Result<()> {
-    let value_json = serde_json::to_string(value)?;
-    let hint_json = serde_json::to_string(&hint.unwrap_or_default())?;
-    let script = format!(
-        r#"
-(() => {{
-  const normalize = (input) => (input || "").replace(/\s+/g, " ").trim();
-  const hint = normalize({hint_json});
-  const fields = Array.from(document.querySelectorAll("input, textarea"))
-    .filter((field) => {{
-      const rect = field.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) {{
-        return false;
-      }}
-      if (field.disabled || field.readOnly) {{
-        return false;
-      }}
-      const type = (field.getAttribute("type") || "text").toLowerCase();
-      return type !== "hidden" && type !== "file" && type !== "checkbox" && type !== "radio";
-    }});
-
-  const match = fields.find((field) => {{
-    if (!hint) {{
-      return true;
-    }}
-    const placeholder = normalize(field.getAttribute("placeholder"));
-    const ariaLabel = normalize(field.getAttribute("aria-label"));
-    return placeholder.includes(hint) || ariaLabel.includes(hint);
-  }}) || fields[0];
-
-  if (!match) {{
-    return false;
-  }}
-
-  const nativeInputValueSetter =
-    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
-  const nativeTextAreaValueSetter =
-    Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
-
-  if (match instanceof HTMLTextAreaElement && nativeTextAreaValueSetter) {{
-    nativeTextAreaValueSetter.call(match, {value_json});
-  }} else if (match instanceof HTMLInputElement && nativeInputValueSetter) {{
-    nativeInputValueSetter.call(match, {value_json});
-  }} else {{
-    match.value = {value_json};
-  }}
-
-  match.dispatchEvent(new Event("input", {{ bubbles: true }}));
-  match.dispatchEvent(new Event("change", {{ bubbles: true }}));
-  return true;
-}})()
-"#
-    );
-
-    if evaluate_bool(runtime, &script).await? {
-        Ok(())
-    } else {
-        Err(PostpubError::External(
-            "failed to fill visible wechat text input".to_string(),
-        ))
-    }
-}
-
-async fn set_wechat_row_switch<R: BrowserRuntime>(
-    runtime: &R,
-    label: &str,
-    enabled: bool,
-) -> Result<()> {
-    let label_json = serde_json::to_string(label)?;
-    let script = format!(
-        r#"
-(() => {{
-  const normalize = (input) => (input || "").replace(/\s+/g, " ").trim();
-  const expected = {label_json};
-  const wantEnabled = {enabled};
-  const nodes = Array.from(document.querySelectorAll("div,li,section,label"));
-  const row = nodes
-    .filter((node) => {{
-      const rect = node.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) {{
-        return false;
-      }}
-      const text = normalize(node.innerText || node.textContent);
-      return text.includes(expected);
-    }})
-    .sort((left, right) => normalize(left.innerText || left.textContent).length - normalize(right.innerText || right.textContent).length)[0];
-
-  if (!row) {{
-    return false;
-  }}
-
-  const text = normalize(row.innerText || row.textContent);
-  if (wantEnabled && (text.includes("已开启") || text.includes("开启"))) {{
-    return true;
-  }}
-  if (!wantEnabled && (text.includes("已关闭") || text.includes("关闭"))) {{
-    return true;
-  }}
-
-  const switchNode = row.querySelector('[role="switch"], input[type="checkbox"], button[aria-checked]');
-  if (switchNode) {{
-    switchNode.click();
-    return true;
-  }}
-
-  row.click();
-  return true;
-}})()
-"#
-    );
-
-    if evaluate_bool(runtime, &script).await? {
-        Ok(())
-    } else {
-        Err(PostpubError::External(format!(
-            "failed to set wechat switch for row: {label}"
-        )))
-    }
-}
-
-async fn set_editor_html<R: BrowserRuntime>(runtime: &R, html: &str) -> Result<()> {
-    let html_json = serde_json::to_string(html)?;
-    let script = format!(
-        r#"
-(() => {{
-  const editor = document.querySelector(".ProseMirror");
-  if (!editor) {{
-    return false;
-  }}
-  editor.focus();
-  editor.innerHTML = {html_json};
-  editor.dispatchEvent(new Event("input", {{ bubbles: true }}));
-  editor.dispatchEvent(new Event("change", {{ bubbles: true }}));
-  return (editor.innerText || "").trim().length > 0;
-}})()
-"#
-    );
-
-    if evaluate_bool(runtime, &script).await? {
-        Ok(())
-    } else {
-        Err(PostpubError::External(
-            "failed to write content into wechat editor".to_string(),
-        ))
-    }
-}
-
-async fn click_first_visible_selector<R: BrowserRuntime>(
-    runtime: &R,
-    selectors: &[&str],
-) -> Result<()> {
-    let selectors_json = serde_json::to_string(selectors)?;
-    let script = format!(
-        r#"
-(() => {{
-  const selectors = {selectors_json};
-  const isVisible = (node) => {{
-    if (!node) {{
-      return false;
-    }}
-    const rect = node.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {{
-      return false;
-    }}
-    const style = getComputedStyle(node);
-    return style.display !== "none" && style.visibility !== "hidden";
-  }};
-
-  for (const selector of selectors) {{
-    const target = Array.from(document.querySelectorAll(selector)).find(isVisible);
-    if (!target) {{
-      continue;
-    }}
-    target.scrollIntoView({{ block: "center", inline: "center" }});
-    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {{
-      target.dispatchEvent(
-        new MouseEvent(type, {{ bubbles: true, cancelable: true, view: window }})
-      );
-    }}
-    if (typeof target.click === "function") {{
-      target.click();
-    }}
-    return true;
-  }}
-
-  return false;
-}})()
-"#
-    );
-
-    if evaluate_bool(runtime, &script).await? {
-        Ok(())
-    } else {
-        Err(PostpubError::External(format!(
-            "failed to click visible wechat selector: {}",
-            selectors.join(", ")
-        )))
-    }
-}
-
-async fn wait_for_any_visible_selector<R: BrowserRuntime>(
-    runtime: &R,
-    selectors: &[&str],
-    timeout: Duration,
-) -> Result<()> {
-    let selectors_json = serde_json::to_string(selectors)?;
-    let script = format!(
-        r#"
-(() => {{
-  const selectors = {selectors_json};
-  const isVisible = (node) => {{
-    if (!node) {{
-      return false;
-    }}
-    const rect = node.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {{
-      return false;
-    }}
-    const style = getComputedStyle(node);
-    return style.display !== "none" && style.visibility !== "hidden";
-  }};
-
-  return selectors.some((selector) =>
-    Array.from(document.querySelectorAll(selector)).some(isVisible)
-  );
-}})()
-"#
-    );
-
-    wait_until_true_with_context(
-        runtime,
-        &script,
-        timeout,
-        &format!("any visible selector: {}", selectors.join(", ")),
-    )
-    .await
-}
-
-async fn is_any_visible_selector<R: BrowserRuntime>(
-    runtime: &R,
-    selectors: &[&str],
-) -> Result<bool> {
-    let selectors_json = serde_json::to_string(selectors)?;
-    let script = format!(
-        r#"
-(() => {{
-  const selectors = {selectors_json};
-  const isVisible = (node) => {{
-    if (!node) {{
-      return false;
-    }}
-    const rect = node.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {{
-      return false;
-    }}
-    const style = getComputedStyle(node);
-    return style.display !== "none" && style.visibility !== "hidden";
-  }};
-
-  return selectors.some((selector) =>
-    Array.from(document.querySelectorAll(selector)).some(isVisible)
-  );
-}})()
-"#
-    );
-
-    evaluate_bool(runtime, &script).await
-}
-
-async fn ensure_wechat_cover_picker_open<R: BrowserRuntime>(runtime: &R) -> Result<()> {
-    if is_any_visible_selector(
-        runtime,
-        &[
-            ".weui-desktop-dialog_img-picker",
-            ".weui-desktop-dialog",
-            ".weui-desktop-popover",
-        ],
-    )
-    .await?
-    {
-        return Ok(());
-    }
-
-    click_first_visible_selector(
-        runtime,
-        &[
-            "#js_cover_area #js_cover_null .js_imagedialog",
-            "#js_cover_area .js_cover_opr .js_imagedialog",
-        ],
-    )
-    .await?;
-    wait_for_text(runtime, "选择图片", Duration::from_secs(10)).await
-}
-
-async fn upload_wechat_cover_file<R: BrowserRuntime>(runtime: &R, cover_path: &Path) -> Result<()> {
-    runtime
-        .upload(
-            r#".weui-desktop-dialog_img-picker .weui-desktop-upload input[type="file"]"#,
-            &[cover_path.to_string_lossy().to_string()],
-        )
-        .await?;
-
-    let file_name = cover_path
-        .file_name()
-        .map(|item| item.to_string_lossy().to_string())
-        .ok_or_else(|| PostpubError::InvalidPath(cover_path.display().to_string()))?;
-    wait_for_text(runtime, &file_name, Duration::from_secs(20)).await
-}
-
-async fn select_wechat_cover_from_article<R: BrowserRuntime>(
-    runtime: &R,
-    _cover_size: WechatCoverSize,
-) -> Result<()> {
-    click_any_text(
-        runtime,
-        &["从正文选择", "正文图片", "正文", "从正文选取"],
-        false,
-    )
-    .await?;
-    wait_for_wechat_cover_candidates(runtime, Duration::from_secs(10)).await?;
-    click_first_wechat_cover_candidate(runtime).await
-}
-
-async fn select_wechat_cover_with_ai<R: BrowserRuntime>(
-    runtime: &R,
-    _cover_size: WechatCoverSize,
-) -> Result<()> {
-    click_any_text(runtime, &["AI配图", "AI 配图", "智能配图"], false).await?;
-    click_any_text(
-        runtime,
-        &["生成封面", "开始生成", "立即生成", "生成配图", "生成"],
-        false,
-    )
-    .await?;
-    wait_for_wechat_cover_candidates(runtime, Duration::from_secs(30)).await?;
-    click_first_wechat_cover_candidate(runtime).await
-}
-
-async fn select_wechat_cover_from_article_with_size<R: BrowserRuntime>(
-    runtime: &R,
-    cover_size: WechatCoverSize,
-) -> Result<()> {
-    let _ = choose_wechat_cover_size(runtime, cover_size).await;
-    select_wechat_cover_from_article(runtime, cover_size).await
-}
-
-async fn select_wechat_cover_with_ai_with_size<R: BrowserRuntime>(
-    runtime: &R,
-    cover_size: WechatCoverSize,
-) -> Result<()> {
-    let _ = choose_wechat_cover_size(runtime, cover_size).await;
-    select_wechat_cover_with_ai(runtime, cover_size).await
-}
-
-async fn choose_wechat_cover_size<R: BrowserRuntime>(
-    runtime: &R,
-    cover_size: WechatCoverSize,
-) -> Result<bool> {
-    let ratio_text = format!("{}:{}", cover_size.width, cover_size.height);
-    let width = cover_size.width;
-    let height = cover_size.height;
-    let script = format!(
-        r#"
-(() => {{
-  const expectedRatio = "{ratio_text}";
-  const expectedX = "{width}x{height}";
-  const expectedMultiply = "{width}×{height}";
-  const normalize = (input) => (input || "").replace(/\s+/g, "").trim().toLowerCase();
-  const isVisible = (node) => {{
-    if (!node) {{
-      return false;
-    }}
-    const rect = node.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {{
-      return false;
-    }}
-    const style = getComputedStyle(node);
-    return style.display !== "none" && style.visibility !== "hidden";
-  }};
-  const nodes = Array.from(document.querySelectorAll("button, label, li, div, span, a"));
-  const deduped = nodes
-    .map((node) => node.closest("button, label, li, a, [role='button']") || node)
-    .filter((node, index, all) => all.indexOf(node) === index);
-  const candidate = deduped.find((node) => {{
-    if (!isVisible(node)) {{
-      return false;
-    }}
-    const text = normalize(node.innerText || node.textContent || "");
-    return text.includes(expectedRatio) || text.includes(expectedX) || text.includes(expectedMultiply);
-  }});
-  if (!candidate) {{
-    return false;
-  }}
-  candidate.scrollIntoView({{ block: "center", inline: "center" }});
-  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {{
-    candidate.dispatchEvent(new MouseEvent(type, {{ bubbles: true, cancelable: true, view: window }}));
-  }}
-  if (typeof candidate.click === "function") {{
-    candidate.click();
-  }}
-  return true;
-}})()
-"#,
-    );
-
-    evaluate_bool(runtime, &script).await
-}
-
-async fn wait_for_wechat_cover_candidates<R: BrowserRuntime>(
-    runtime: &R,
-    timeout: Duration,
-) -> Result<()> {
-    let script = r#"
-(() => {
-  const normalize = (input) => (input || "").replace(/\s+/g, " ").trim();
-  const isVisible = (node) => {
-    if (!node) {
-      return false;
-    }
-    const rect = node.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {
-      return false;
-    }
-    const style = getComputedStyle(node);
-    return style.display !== "none" && style.visibility !== "hidden";
-  };
-  const excludedTexts = ["上传", "本地上传", "选择图片", "从正文选择", "AI配图", "AI 配图", "智能配图", "下一步", "确定", "确认", "取消", "关闭", "保存"];
-  const dialog =
-    Array.from(document.querySelectorAll(".weui-desktop-dialog, .weui-desktop-dialog_img-picker, .weui-desktop-popover"))
-      .filter(isVisible)
-      .pop() || document.body;
-  const nodes = Array.from(dialog.querySelectorAll("button, label, li, div, a, span, img"));
-  return nodes.some((node) => {
-    const target = node.closest("button, label, li, div, a") || node;
-    if (!isVisible(target)) {
-      return false;
-    }
-    const text = normalize(target.innerText || target.textContent || "");
-    if (excludedTexts.some((item) => text.includes(item))) {
-      return false;
-    }
-    const hasImage = !!target.querySelector("img");
-    const style = getComputedStyle(target);
-    return hasImage || (style.backgroundImage && style.backgroundImage !== "none");
-  });
-})()
-"#;
-
-    wait_until_true_with_context(runtime, script, timeout, "wechat cover candidates").await
-}
-
-async fn click_first_wechat_cover_candidate<R: BrowserRuntime>(runtime: &R) -> Result<()> {
-    let script = r#"
-(() => {
-  const normalize = (input) => (input || "").replace(/\s+/g, " ").trim();
-  const isVisible = (node) => {
-    if (!node) {
-      return false;
-    }
-    const rect = node.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {
-      return false;
-    }
-    const style = getComputedStyle(node);
-    return style.display !== "none" && style.visibility !== "hidden";
-  };
-  const excludedTexts = ["上传", "本地上传", "选择图片", "从正文选择", "AI配图", "AI 配图", "智能配图", "下一步", "确定", "确认", "取消", "关闭", "保存"];
-  const dialog =
-    Array.from(document.querySelectorAll(".weui-desktop-dialog, .weui-desktop-dialog_img-picker, .weui-desktop-popover"))
-      .filter(isVisible)
-      .pop() || document.body;
-  const candidate = Array.from(dialog.querySelectorAll("button, label, li, div, a, span, img"))
-    .map((node) => node.closest("button, label, li, div, a") || node)
-    .filter((node) => {
-      if (!isVisible(node)) {
-        return false;
-      }
-      const text = normalize(node.innerText || node.textContent || "");
-      if (excludedTexts.some((item) => text.includes(item))) {
-        return false;
-      }
-      const hasImage = !!node.querySelector("img");
-      const style = getComputedStyle(node);
-      return hasImage || (style.backgroundImage && style.backgroundImage !== "none");
-    })
-    .map((node) => {
-      const rect = node.getBoundingClientRect();
-      const text = normalize(node.innerText || node.textContent || "");
-      return { node, textLength: text.length, area: rect.width * rect.height };
-    })
-    .sort((left, right) => left.textLength - right.textLength || right.area - left.area)[0];
-
-  if (!candidate) {
-    return false;
-  }
-
-  const target = candidate.node;
-  target.scrollIntoView({ block: "center", inline: "center" });
-  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-    target.dispatchEvent(
-      new MouseEvent(type, { bubbles: true, cancelable: true, view: window })
-    );
-  }
-  if (typeof target.click === "function") {
-    target.click();
-  }
-  return true;
-})()
-"#;
-
-    if evaluate_bool(runtime, script).await? {
-        Ok(())
-    } else {
-        Err(PostpubError::External(
-            "failed to select a wechat cover candidate".to_string(),
-        ))
-    }
-}
-
-async fn wait_for_wechat_cover_preview<R: BrowserRuntime>(
-    runtime: &R,
-    timeout: Duration,
-) -> Result<()> {
-    wait_until_true_with_context(
-        runtime,
-        r##"(() => {
-            const preview = document.querySelector("#js_cover_area .js_cover_preview_new");
-            return !!preview && getComputedStyle(preview).backgroundImage && getComputedStyle(preview).backgroundImage !== "none";
-        })()"##,
-        timeout,
-        "wechat cover preview",
-    )
-    .await
-}
-
-async fn wait_for_text<R: BrowserRuntime>(
-    runtime: &R,
-    expected: &str,
-    timeout: Duration,
-) -> Result<()> {
-    let expected_json = serde_json::to_string(expected)?;
-    let inner_text_script =
-        format!(r#"(() => (document.body?.innerText || "").includes({expected_json}))()"#);
-    let deadline = Instant::now() + timeout;
-    loop {
-        let text = runtime.get_text("body").await?;
-        if text.contains(expected) {
-            return Ok(());
-        }
-        if evaluate_bool(runtime, &inner_text_script).await? {
-            return Ok(());
-        }
-
-        if Instant::now() >= deadline {
-            return Err(PostpubError::External(format!(
-                "timed out waiting for wechat text: {expected}"
-            )));
-        }
-
-        sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -2257,6 +1992,89 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("invalid wechat cover size"));
+    }
+
+    #[test]
+    fn builds_digest_from_plain_text_content() {
+        let digest = build_wechat_digest("<section><h1>Title</h1><p>Hello world</p></section>");
+
+        assert_eq!(digest, "Title Hello world");
+    }
+
+    #[test]
+    fn parses_wechat_create_draft_response() {
+        let response = WechatDraftApiResponse {
+            base_resp: Some(WechatBaseResp {
+                ret: Some(Value::from(0)),
+                err_msg: Some(String::new()),
+            }),
+            ret: Some(Value::from("0")),
+            app_msg_id: Some(Value::from(100000876)),
+            app_msg_id_alt: None,
+            data_seq: Some(Value::from("4492886931013566466")),
+            filter_content_html: Some(vec![WechatFilteredContent {
+                content: "<p>filtered</p>".to_string(),
+            }]),
+        };
+        let plan = WechatPublishPlan {
+            title: "Demo".to_string(),
+            body_html: "<p>raw</p>".to_string(),
+            digest: "raw".to_string(),
+            format: "html".to_string(),
+            cover: WechatCoverRequest {
+                plan: WechatCoverPlan::BodyFirstImage,
+                size: WechatCoverSize {
+                    width: 900,
+                    height: 383,
+                },
+            },
+        };
+
+        let parsed = parse_wechat_draft_response(response, &plan, None).expect("parse response");
+
+        assert_eq!(parsed.appmsgid, "100000876");
+        assert_eq!(parsed.data_seq, "4492886931013566466");
+        assert_eq!(parsed.content_html, "<p>filtered</p>");
+    }
+
+    #[test]
+    fn update_fields_include_cover_payload() {
+        let target = PublishTargetConfig::default();
+        let plan = WechatPublishPlan {
+            title: "Demo".to_string(),
+            body_html: "<p>body</p>".to_string(),
+            digest: "body".to_string(),
+            format: "html".to_string(),
+            cover: WechatCoverRequest {
+                plan: WechatCoverPlan::BodyFirstImage,
+                size: WechatCoverSize {
+                    width: 900,
+                    height: 383,
+                },
+            },
+        };
+        let draft = WechatDraftState {
+            appmsgid: "100000876".to_string(),
+            data_seq: "seq".to_string(),
+            content_html: "<p>filtered</p>".to_string(),
+            cover: Some(WechatCoverState {
+                cdn_url: "https://mmbiz.qpic.cn/main".to_string(),
+                cdn_235_1_url: "https://mmbiz.qpic.cn/235".to_string(),
+                cdn_1_1_url: "https://mmbiz.qpic.cn/1".to_string(),
+                original_url: "https://mmbiz.qpic.cn/original".to_string(),
+                crop_list: "{\"crop_list\":[]}".to_string(),
+                fileid: "100000877".to_string(),
+            }),
+        };
+
+        let fields = build_wechat_appmsg_fields(&target, &plan, Some(&draft));
+
+        assert!(fields.contains(&("AppMsgId".to_string(), "100000876".to_string())));
+        assert!(fields.contains(&(
+            "cdn_235_1_url0".to_string(),
+            "https://mmbiz.qpic.cn/235".to_string()
+        )));
+        assert!(fields.contains(&("fileid0".to_string(), "100000877".to_string())));
     }
 
     #[tokio::test]
